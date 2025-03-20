@@ -16,6 +16,7 @@ virgl_resource_map2 = []
 nitro = []
 
 [dependencies]
+intaglio = "1.10.0"
 bitflags = "1.2.0"
 crossbeam-channel = ">=0.5.15"
 libc = ">=0.2.39"
@@ -48,3 +49,7 @@ kvm-ioctls = ">=0.21"
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 vm-fdt = ">= 0.2.0"
+
+
+[dev-dependencies]
+tempfile = "3.17.1"
