@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use crossbeam_channel::{unbounded, Sender};
-use hvf::MemoryMapping;
+use utils::worker_message::WorkerMessage;
 use intaglio::cstr::SymbolTable;
 use intaglio::Symbol;
 
@@ -2666,7 +2666,7 @@ impl OverlayFs {
         moffset: u64,
         guest_shm_base: u64,
         shm_size: u64,
-        map_sender: &Option<Sender<MemoryMapping>>,
+        map_sender: &Option<Sender<WorkerMessage>>,
     ) -> io::Result<()> {
         if map_sender.is_none() {
             return Err(linux_error(io::Error::from_raw_os_error(libc::ENOSYS)));
@@ -2714,7 +2714,7 @@ impl OverlayFs {
         let sender = map_sender.as_ref().unwrap();
         let (reply_sender, reply_receiver) = unbounded();
         sender
-            .send(MemoryMapping::AddMapping(
+            .send(WorkerMessage::GpuAddMapping(
                 reply_sender,
                 host_addr as u64,
                 guest_addr,
@@ -2740,7 +2740,7 @@ impl OverlayFs {
         requests: Vec<fuse::RemovemappingOne>,
         guest_shm_base: u64,
         shm_size: u64,
-        map_sender: &Option<Sender<MemoryMapping>>,
+        map_sender: &Option<Sender<WorkerMessage>>,
     ) -> io::Result<()> {
         if map_sender.is_none() {
             return Err(linux_error(io::Error::from_raw_os_error(libc::ENOSYS)));
@@ -2763,7 +2763,7 @@ impl OverlayFs {
             let sender = map_sender.as_ref().unwrap();
             let (reply_sender, reply_receiver) = unbounded();
             sender
-                .send(MemoryMapping::RemoveMapping(
+                .send(WorkerMessage::GpuRemoveMapping(
                     reply_sender,
                     guest_addr,
                     req.len,
@@ -3297,7 +3297,7 @@ impl FileSystem for OverlayFs {
         moffset: u64,
         guest_shm_base: u64,
         shm_size: u64,
-        map_sender: &Option<Sender<MemoryMapping>>,
+        map_sender: &Option<Sender<WorkerMessage>>,
     ) -> io::Result<()> {
         self.do_setupmapping(
             inode,
@@ -3317,7 +3317,7 @@ impl FileSystem for OverlayFs {
         requests: Vec<fuse::RemovemappingOne>,
         guest_shm_base: u64,
         shm_size: u64,
-        map_sender: &Option<Sender<MemoryMapping>>,
+        map_sender: &Option<Sender<WorkerMessage>>,
     ) -> io::Result<()> {
         self.do_removemapping(requests, guest_shm_base, shm_size, map_sender)
     }

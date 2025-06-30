@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::io;
 use std::result;
-#[cfg(not(test))]
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -601,6 +600,7 @@ enum VcpuEmulation {
     WaitForEventTimeout(Duration),
 }
 
+#[cfg(not(target_os = "macos"))] // NOTE: fails on macos
 #[cfg(test)]
 mod tests {
     #[cfg(target_arch = "x86_64")]

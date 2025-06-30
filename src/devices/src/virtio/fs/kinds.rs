@@ -4,10 +4,9 @@ use std::{ffi::CStr, io, path::PathBuf, sync::{atomic::AtomicI32, Arc}, time::Du
 
 #[cfg(target_os = "macos")]
 use crossbeam_channel::Sender;
-#[cfg(target_os = "macos")]
-use hvf::MemoryMapping;
 
 use crate::virtio::bindings;
+use utils::worker_message::WorkerMessage;
 
 use super::{
     filesystem::{
@@ -537,7 +536,7 @@ impl FileSystem for FsImpl {
         moffset: u64,
         host_shm_base: u64,
         shm_size: u64,
-        #[cfg(target_os = "macos")] map_sender: &Option<Sender<MemoryMapping>>,
+        #[cfg(target_os = "macos")] map_sender: &Option<Sender<WorkerMessage>>,
     ) -> io::Result<()> {
         match self {
             FsImpl::Passthrough(fs) => fs.setupmapping(
@@ -573,7 +572,7 @@ impl FileSystem for FsImpl {
         requests: Vec<RemovemappingOne>,
         host_shm_base: u64,
         shm_size: u64,
-        #[cfg(target_os = "macos")] map_sender: &Option<Sender<MemoryMapping>>,
+        #[cfg(target_os = "macos")] map_sender: &Option<Sender<WorkerMessage>>,
     ) -> io::Result<()> {
         match self {
             FsImpl::Passthrough(fs) => {
