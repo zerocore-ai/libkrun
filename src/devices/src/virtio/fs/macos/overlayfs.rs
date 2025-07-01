@@ -662,53 +662,35 @@ impl OverlayFs {
 
         // Check for empty name
         if name_bytes.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "empty name is not allowed",
-            ));
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
         }
 
         // Check for path traversal sequences
         if name_bytes == b".." || name_bytes.contains(&b'/') || name_bytes.contains(&b'\\') {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "path traversal attempt detected",
-            ));
+            return Err(io::Error::from_raw_os_error(libc::EPERM));
         }
 
         // Check for null bytes
         if name_bytes.contains(&0) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "name contains null bytes",
-            ));
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
         }
 
         // Convert to str for string pattern matching
         let name_str = match std::str::from_utf8(name_bytes) {
             Ok(s) => s,
             Err(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "name contains invalid UTF-8",
-                ))
+                return Err(io::Error::from_raw_os_error(libc::EINVAL));
             }
         };
 
         // Check for whiteout prefix
         if name_str.starts_with(".wh.") {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "name cannot start with whiteout prefix",
-            ));
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
         }
 
         // Check for opaque marker
         if name_str == ".wh..wh..opq" {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "name cannot be an opaque directory marker",
-            ));
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
         }
 
         Ok(())
