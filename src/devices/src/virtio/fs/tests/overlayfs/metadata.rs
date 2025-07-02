@@ -4,7 +4,8 @@ use crate::virtio::{
     bindings::{self, LINUX_ENODATA, LINUX_ENOSYS},
     fs::filesystem::{Context, FileSystem, GetxattrReply, ListxattrReply},
     fuse::{FsOptions, SetattrValid},
-    linux_errno::LINUX_ERANGE, overlayfs::{Config, OverlayFs},
+    linux_errno::LINUX_ERANGE,
+    overlayfs::{Config, OverlayFs},
 };
 
 use super::helper;
@@ -706,9 +707,9 @@ fn test_xattrs() -> io::Result<()> {
     // Try to read the xattr directly from the middle layer file (should not exist)
     let middle_layer_path = CString::new(middle_layer_file.to_str().unwrap()).unwrap();
     let mut buf = vec![0; 100];
+
     #[cfg(target_os = "macos")]
     let res = unsafe {
-        #[cfg(target_os = "macos")]
         libc::getxattr(
             middle_layer_path.as_ptr(),
             middle_xattr_name.as_ptr(),
@@ -731,9 +732,15 @@ fn test_xattrs() -> io::Result<()> {
 
     assert!(res < 0, "Xattr should not exist on middle layer file");
     let err = io::Error::last_os_error();
+
+    #[cfg(target_os = "macos")]
+    let expected_error = libc::ENOATTR;
+    #[cfg(target_os = "linux")]
+    let expected_error = libc::ENODATA;
+
     assert!(
-        err.raw_os_error().unwrap() == libc::ENODATA,
-        "Expected ENODATA when reading xattr from middle layer file"
+        err.raw_os_error().unwrap() == expected_error,
+        "Expected platform-specific 'attribute not found' error when reading xattr from middle layer file"
     );
 
     // ---------- Test xattrs on nested directories ----------

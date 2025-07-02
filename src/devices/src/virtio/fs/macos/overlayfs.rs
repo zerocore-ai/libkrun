@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use crossbeam_channel::{unbounded, Sender};
-use hvf::MemoryMapping;
+use utils::worker_message::WorkerMessage;
 use intaglio::cstr::SymbolTable;
 use intaglio::Symbol;
 
@@ -48,7 +48,7 @@ const OPAQUE_MARKER: &str = ".wh..wh..opq";
 const VOL_DIR: &str = ".vol";
 
 /// The owner and permissions attribute
-const OWNER_PERMS_XATTR_KEY: &[u8] = b"user.vm.owner_perms\0";
+const OVERRIDE_STAT_XATTR_KEY: &[u8] = b"user.containers.override_stat\0";
 
 /// Maximum allowed number of layers for the overlay filesystem.
 const MAX_LAYERS: usize = 128;
@@ -662,53 +662,35 @@ impl OverlayFs {
 
         // Check for empty name
         if name_bytes.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "empty name is not allowed",
-            ));
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
         }
 
         // Check for path traversal sequences
         if name_bytes == b".." || name_bytes.contains(&b'/') || name_bytes.contains(&b'\\') {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "path traversal attempt detected",
-            ));
+            return Err(io::Error::from_raw_os_error(libc::EPERM));
         }
 
         // Check for null bytes
         if name_bytes.contains(&0) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "name contains null bytes",
-            ));
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
         }
 
         // Convert to str for string pattern matching
         let name_str = match std::str::from_utf8(name_bytes) {
             Ok(s) => s,
             Err(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "name contains invalid UTF-8",
-                ))
+                return Err(io::Error::from_raw_os_error(libc::EINVAL));
             }
         };
 
         // Check for whiteout prefix
         if name_str.starts_with(".wh.") {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "name cannot start with whiteout prefix",
-            ));
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
         }
 
         // Check for opaque marker
         if name_str == ".wh..wh..opq" {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "name cannot be an opaque directory marker",
-            ));
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
         }
 
         Ok(())
@@ -1025,7 +1007,7 @@ impl OverlayFs {
         let mut stat = Self::unpatched_stat(file)?;
 
         // Get owner and permissions from xattr
-        if let Ok(Some((uid, gid, mode))) = Self::get_owner_perms_attr(file, &stat) {
+        if let Ok(Some((uid, gid, mode))) = Self::get_override_xattr(file, &stat) {
             // Update the stat with the xattr values if available
             stat.st_uid = uid;
             stat.st_gid = gid;
@@ -1036,7 +1018,7 @@ impl OverlayFs {
         Ok(stat)
     }
 
-    fn get_owner_perms_attr(
+    fn get_override_xattr(
         file: &FileId,
         st: &bindings::stat64,
     ) -> io::Result<Option<(u32, u32, u16)>> {
@@ -1066,7 +1048,7 @@ impl OverlayFs {
             FileId::Path(path) => unsafe {
                 libc::getxattr(
                     path.as_ptr(),
-                    OWNER_PERMS_XATTR_KEY.as_ptr() as *const i8,
+                    OVERRIDE_STAT_XATTR_KEY.as_ptr() as *const i8,
                     buf.as_mut_ptr() as *mut libc::c_void,
                     buf.len(),
                     0,
@@ -1076,7 +1058,7 @@ impl OverlayFs {
             FileId::Fd(fd) => unsafe {
                 libc::fgetxattr(
                     *fd,
-                    OWNER_PERMS_XATTR_KEY.as_ptr() as *const i8,
+                    OVERRIDE_STAT_XATTR_KEY.as_ptr() as *const i8,
                     buf.as_mut_ptr() as *mut libc::c_void,
                     buf.len(),
                     0,
@@ -1109,7 +1091,7 @@ impl OverlayFs {
         Ok(Some((uid, gid, mode)))
     }
 
-    fn set_owner_perms_attr(
+    fn set_override_xattr(
         file: &FileId,
         st: &bindings::stat64,
         owner: Option<(u32, u32)>,
@@ -1140,7 +1122,7 @@ impl OverlayFs {
             FileId::Path(path) => unsafe {
                 libc::setxattr(
                     path.as_ptr(),
-                    OWNER_PERMS_XATTR_KEY.as_ptr() as *const i8,
+                    OVERRIDE_STAT_XATTR_KEY.as_ptr() as *const i8,
                     value_bytes.as_ptr() as *const libc::c_void,
                     value_bytes.len(),
                     0,
@@ -1150,7 +1132,7 @@ impl OverlayFs {
             FileId::Fd(fd) => unsafe {
                 libc::fsetxattr(
                     *fd,
-                    OWNER_PERMS_XATTR_KEY.as_ptr() as *const i8,
+                    OVERRIDE_STAT_XATTR_KEY.as_ptr() as *const i8,
                     value_bytes.as_ptr() as *const libc::c_void,
                     value_bytes.len(),
                     0,
@@ -1729,14 +1711,14 @@ impl OverlayFs {
                 .or_else(|| uid.map(|u| (u, current_stat.st_gid)))
                 .or_else(|| gid.map(|g| (current_stat.st_uid, g)))
             {
-                Self::set_owner_perms_attr(&file_id, &current_stat, Some((uid, gid)), None)?;
+                Self::set_override_xattr(&file_id, &current_stat, Some((uid, gid)), None)?;
             }
         }
 
         // Handle mode changes
         if valid.contains(SetattrValid::MODE) {
             let mode = attr.st_mode & 0o7777;
-            Self::set_owner_perms_attr(&file_id, &current_stat, None, Some(mode))?;
+            Self::set_override_xattr(&file_id, &current_stat, None, Some(mode))?;
         }
 
         // Handle size changes
@@ -1845,7 +1827,7 @@ impl OverlayFs {
             let stat = Self::unpatched_stat(&FileId::Path(c_path.clone()))?;
 
             // Set ownership and permissions
-            Self::set_owner_perms_attr(
+            Self::set_override_xattr(
                 &FileId::Path(c_path.clone()),
                 &stat,
                 Some((ctx.uid, ctx.gid)),
@@ -1969,7 +1951,7 @@ impl OverlayFs {
 
             // Set ownership and permissions
             let mode = libc::S_IFLNK | 0o777;
-            Self::set_owner_perms_attr(
+            Self::set_override_xattr(
                 &FileId::Path(c_path.clone()),
                 &stat,
                 Some((ctx.uid, ctx.gid)),
@@ -2058,7 +2040,7 @@ impl OverlayFs {
             };
 
             let stat = Self::unpatched_stat(&FileId::Fd(fd))?;
-            Self::set_owner_perms_attr(&FileId::Fd(fd), &stat, None, Some(libc::S_IFCHR | 0o600))?;
+            Self::set_override_xattr(&FileId::Fd(fd), &stat, None, Some(libc::S_IFCHR | 0o600))?;
 
             if fd < 0 {
                 return Err(io::Error::last_os_error());
@@ -2188,7 +2170,7 @@ impl OverlayFs {
         }
 
         // Don't allow setting the owner/permissions attribute
-        if name.to_bytes() == OWNER_PERMS_XATTR_KEY {
+        if name.to_bytes() == OVERRIDE_STAT_XATTR_KEY {
             return Err(linux_error(io::Error::from_raw_os_error(libc::EACCES)));
         }
 
@@ -2242,7 +2224,7 @@ impl OverlayFs {
         }
 
         // Don't allow getting the owner/permissions attribute
-        if name.to_bytes() == OWNER_PERMS_XATTR_KEY {
+        if name.to_bytes() == OVERRIDE_STAT_XATTR_KEY {
             return Err(linux_error(io::Error::from_raw_os_error(libc::EACCES)));
         }
 
@@ -2328,8 +2310,8 @@ impl OverlayFs {
 
             // Remove the owner/permissions attribute from the list of attributes
             for attr in buf.split(|c| *c == 0) {
-                if attr.starts_with(&OWNER_PERMS_XATTR_KEY[..OWNER_PERMS_XATTR_KEY.len() - 1]) {
-                    clean_size -= OWNER_PERMS_XATTR_KEY.len();
+                if attr.starts_with(&OVERRIDE_STAT_XATTR_KEY[..OVERRIDE_STAT_XATTR_KEY.len() - 1]) {
+                    clean_size -= OVERRIDE_STAT_XATTR_KEY.len();
                 }
             }
 
@@ -2340,7 +2322,7 @@ impl OverlayFs {
             // Remove the owner/permissions attribute from the list of attributes
             for attr in buf.split(|c| *c == 0) {
                 if attr.is_empty()
-                    || attr.starts_with(&OWNER_PERMS_XATTR_KEY[..OWNER_PERMS_XATTR_KEY.len() - 1])
+                    || attr.starts_with(&OVERRIDE_STAT_XATTR_KEY[..OVERRIDE_STAT_XATTR_KEY.len() - 1])
                 {
                     continue;
                 }
@@ -2368,7 +2350,7 @@ impl OverlayFs {
         }
 
         // Don't allow setting the owner/permissions attribute
-        if name.to_bytes() == OWNER_PERMS_XATTR_KEY {
+        if name.to_bytes() == OVERRIDE_STAT_XATTR_KEY {
             return Err(linux_error(io::Error::from_raw_os_error(libc::EACCES)));
         }
 
@@ -2454,7 +2436,7 @@ impl OverlayFs {
         let stat = Self::unpatched_stat(&FileId::Path(c_path.clone()))?;
 
         // Set ownership and permissions
-        if let Err(e) = Self::set_owner_perms_attr(
+        if let Err(e) = Self::set_override_xattr(
             &FileId::Fd(fd),
             &stat,
             Some((ctx.uid, ctx.gid)),
@@ -2557,7 +2539,7 @@ impl OverlayFs {
         let stat = Self::unpatched_stat(&FileId::Path(c_path.clone()))?;
 
         // Set ownership and permissions
-        if let Err(e) = Self::set_owner_perms_attr(
+        if let Err(e) = Self::set_override_xattr(
             &FileId::Fd(fd),
             &stat,
             Some((ctx.uid, ctx.gid)),
@@ -2666,7 +2648,7 @@ impl OverlayFs {
         moffset: u64,
         guest_shm_base: u64,
         shm_size: u64,
-        map_sender: &Option<Sender<MemoryMapping>>,
+        map_sender: &Option<Sender<WorkerMessage>>,
     ) -> io::Result<()> {
         if map_sender.is_none() {
             return Err(linux_error(io::Error::from_raw_os_error(libc::ENOSYS)));
@@ -2714,7 +2696,7 @@ impl OverlayFs {
         let sender = map_sender.as_ref().unwrap();
         let (reply_sender, reply_receiver) = unbounded();
         sender
-            .send(MemoryMapping::AddMapping(
+            .send(WorkerMessage::GpuAddMapping(
                 reply_sender,
                 host_addr as u64,
                 guest_addr,
@@ -2740,7 +2722,7 @@ impl OverlayFs {
         requests: Vec<fuse::RemovemappingOne>,
         guest_shm_base: u64,
         shm_size: u64,
-        map_sender: &Option<Sender<MemoryMapping>>,
+        map_sender: &Option<Sender<WorkerMessage>>,
     ) -> io::Result<()> {
         if map_sender.is_none() {
             return Err(linux_error(io::Error::from_raw_os_error(libc::ENOSYS)));
@@ -2763,7 +2745,7 @@ impl OverlayFs {
             let sender = map_sender.as_ref().unwrap();
             let (reply_sender, reply_receiver) = unbounded();
             sender
-                .send(MemoryMapping::RemoveMapping(
+                .send(WorkerMessage::GpuRemoveMapping(
                     reply_sender,
                     guest_addr,
                     req.len,
@@ -3297,7 +3279,7 @@ impl FileSystem for OverlayFs {
         moffset: u64,
         guest_shm_base: u64,
         shm_size: u64,
-        map_sender: &Option<Sender<MemoryMapping>>,
+        map_sender: &Option<Sender<WorkerMessage>>,
     ) -> io::Result<()> {
         self.do_setupmapping(
             inode,
@@ -3317,7 +3299,7 @@ impl FileSystem for OverlayFs {
         requests: Vec<fuse::RemovemappingOne>,
         guest_shm_base: u64,
         shm_size: u64,
-        map_sender: &Option<Sender<MemoryMapping>>,
+        map_sender: &Option<Sender<WorkerMessage>>,
     ) -> io::Result<()> {
         self.do_removemapping(requests, guest_shm_base, shm_size, map_sender)
     }

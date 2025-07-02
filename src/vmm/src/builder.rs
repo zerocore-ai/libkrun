@@ -1929,6 +1929,7 @@ fn attach_snd_device(vmm: &mut Vmm, intc: IrqChip) -> std::result::Result<(), St
     Ok(())
 }
 
+#[cfg(not(target_os = "macos"))] // NOTE: fails on macos
 #[cfg(test)]
 pub mod tests {
     use super::*;

@@ -818,6 +818,36 @@ impl PassthroughFs {
 
         mflags
     }
+
+    /// Validates a name to prevent path traversal attacks
+    ///
+    /// This function checks if a name contains:
+    /// - Path traversal sequences like ".."
+    /// - Other potentially dangerous patterns like slashes
+    ///
+    /// Returns:
+    /// - Ok(()) if the name is safe
+    /// - Err(io::Error) if the name contains invalid patterns
+    fn validate_name(name: &CStr) -> io::Result<()> {
+        let name_bytes = name.to_bytes();
+
+        // Check for empty name
+        if name_bytes.is_empty() {
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+
+        // Check for path traversal sequences
+        if name_bytes == b".." || name_bytes.contains(&b'/') || name_bytes.contains(&b'\\') {
+            return Err(io::Error::from_raw_os_error(libc::EPERM));
+        }
+
+        // Check for null bytes
+        if name_bytes.contains(&0) {
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+
+        Ok(())
+    }
 }
 
 fn set_secctx(file: StatFile, secctx: SecContext, symlink: bool) -> io::Result<()> {
@@ -973,6 +1003,8 @@ impl FileSystem for PassthroughFs {
     }
 
     fn lookup(&self, _ctx: Context, parent: Inode, name: &CStr) -> io::Result<Entry> {
+        Self::validate_name(name)?;
+
         debug!("lookup: {:?}", name);
         let _init_name = unsafe { CStr::from_bytes_with_nul_unchecked(INIT_CSTR) };
 
@@ -1054,6 +1086,8 @@ impl FileSystem for PassthroughFs {
         umask: u32,
         extensions: Extensions,
     ) -> io::Result<Entry> {
+        Self::validate_name(name)?;
+
         let c_path = self.name_to_path(parent, name)?;
 
         // Safe because this doesn't modify any memory and we check the return value.
@@ -1076,6 +1110,7 @@ impl FileSystem for PassthroughFs {
     }
 
     fn rmdir(&self, ctx: Context, parent: Inode, name: &CStr) -> io::Result<()> {
+        Self::validate_name(name)?;
         self.do_unlink(ctx, parent, name, libc::AT_REMOVEDIR)
     }
 
@@ -1156,6 +1191,8 @@ impl FileSystem for PassthroughFs {
         umask: u32,
         extensions: Extensions,
     ) -> io::Result<(Entry, Option<Handle>, OpenOptions)> {
+        Self::validate_name(name)?;
+
         let c_path = self.name_to_path(parent, name)?;
 
         let flags = self.parse_open_flags(flags as i32);
@@ -1221,6 +1258,7 @@ impl FileSystem for PassthroughFs {
     }
 
     fn unlink(&self, ctx: Context, parent: Inode, name: &CStr) -> io::Result<()> {
+        Self::validate_name(name)?;
         self.do_unlink(ctx, parent, name, 0)
     }
 
@@ -1429,6 +1467,9 @@ impl FileSystem for PassthroughFs {
         newname: &CStr,
         flags: u32,
     ) -> io::Result<()> {
+        Self::validate_name(oldname)?;
+        Self::validate_name(newname)?;
+
         let mut mflags: u32 = 0;
         if ((flags as i32) & bindings::LINUX_RENAME_NOREPLACE) != 0 {
             mflags |= libc::RENAME_EXCL;
@@ -1486,6 +1527,8 @@ impl FileSystem for PassthroughFs {
         umask: u32,
         extensions: Extensions,
     ) -> io::Result<Entry> {
+        Self::validate_name(name)?;
+
         let c_path = self.name_to_path(parent, name)?;
 
         let fd = unsafe {
@@ -1524,6 +1567,8 @@ impl FileSystem for PassthroughFs {
         newparent: Inode,
         newname: &CStr,
     ) -> io::Result<Entry> {
+        Self::validate_name(newname)?;
+
         let orig_c_path = self.inode_to_path(inode)?;
         let link_c_path = self.name_to_path(newparent, newname)?;
 
@@ -1544,6 +1589,8 @@ impl FileSystem for PassthroughFs {
         name: &CStr,
         extensions: Extensions,
     ) -> io::Result<Entry> {
+        Self::validate_name(name)?;
+
         let c_path = self.name_to_path(parent, name)?;
 
         // Safe because this doesn't modify any memory and we check the return value.
