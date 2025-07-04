@@ -13,9 +13,9 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use crossbeam_channel::{unbounded, Sender};
-use utils::worker_message::WorkerMessage;
 use intaglio::cstr::SymbolTable;
 use intaglio::Symbol;
+use utils::worker_message::WorkerMessage;
 
 use crate::virtio::bindings;
 use crate::virtio::fs::filesystem::{
@@ -25,7 +25,6 @@ use crate::virtio::fs::filesystem::{
 use crate::virtio::fs::fuse;
 use crate::virtio::fs::multikey::MultikeyBTreeMap;
 use crate::virtio::linux_errno::{linux_error, LINUX_ERANGE};
-
 
 //--------------------------------------------------------------------------------------------------
 // Modules
@@ -936,7 +935,8 @@ impl OverlayFs {
         let symbol = self.intern_name(name)?;
         path_segments.push(symbol);
 
-        let (mut entry, child_data, path_inodes) = self.lookup_layer_by_layer(parent_data.layer_idx, &path_segments)?;
+        let (mut entry, child_data, path_inodes) =
+            self.lookup_layer_by_layer(parent_data.layer_idx, &path_segments)?;
 
         // Set the submount flag if the entry is a directory and the submounts are announced
         let mut attr_flags = 0;
@@ -1689,36 +1689,48 @@ impl OverlayFs {
             FileId::Path(c_path)
         };
 
-        // Consolidate attribute changes using a single setattrlist call
-        let current_stat = Self::patched_stat(&file_id)?;
+        let mut updated_stat = Self::patched_stat(&file_id)?;
 
-        // Handle ownership changes
-        if valid.intersects(SetattrValid::UID | SetattrValid::GID) {
-            let uid = if valid.contains(SetattrValid::UID) {
-                Some(attr.st_uid)
+        // Handle ownership and mode changes together
+        let needs_xattr_update =
+            valid.intersects(SetattrValid::UID | SetattrValid::GID | SetattrValid::MODE);
+
+        if needs_xattr_update {
+            let owner = if valid.intersects(SetattrValid::UID | SetattrValid::GID) {
+                let uid = if valid.contains(SetattrValid::UID) {
+                    attr.st_uid
+                } else {
+                    updated_stat.st_uid
+                };
+
+                let gid = if valid.contains(SetattrValid::GID) {
+                    attr.st_gid
+                } else {
+                    updated_stat.st_gid
+                };
+
+                Some((uid, gid))
             } else {
                 None
             };
 
-            let gid = if valid.contains(SetattrValid::GID) {
-                Some(attr.st_gid)
+            let mode = if valid.contains(SetattrValid::MODE) {
+                Some(attr.st_mode & 0o7777)
             } else {
                 None
             };
 
-            if let Some((uid, gid)) = uid
-                .zip(gid)
-                .or_else(|| uid.map(|u| (u, current_stat.st_gid)))
-                .or_else(|| gid.map(|g| (current_stat.st_uid, g)))
-            {
-                Self::set_override_xattr(&file_id, &current_stat, Some((uid, gid)), None)?;
+            Self::set_override_xattr(&file_id, &updated_stat, owner, mode)?;
+
+            // Update the stat structure with the new values
+            if let Some((uid, gid)) = owner {
+                updated_stat.st_uid = uid;
+                updated_stat.st_gid = gid;
             }
-        }
 
-        // Handle mode changes
-        if valid.contains(SetattrValid::MODE) {
-            let mode = attr.st_mode & 0o7777;
-            Self::set_override_xattr(&file_id, &current_stat, None, Some(mode))?;
+            if let Some(mode) = mode {
+                updated_stat.st_mode = (updated_stat.st_mode & !0o7777u16) | mode;
+            }
         }
 
         // Handle size changes
@@ -1733,9 +1745,15 @@ impl OverlayFs {
             if res < 0 {
                 return Err(io::Error::last_os_error());
             }
+
+            // Update the stat structure with the new size
+            updated_stat.st_size = attr.st_size;
         }
 
         // Handle timestamp changes
+        let has_dynamic_timestamps =
+            valid.contains(SetattrValid::ATIME_NOW) || valid.contains(SetattrValid::MTIME_NOW);
+
         if valid.intersects(SetattrValid::ATIME | SetattrValid::MTIME) {
             let mut tvs = [
                 libc::timespec {
@@ -1753,6 +1771,9 @@ impl OverlayFs {
             } else if valid.contains(SetattrValid::ATIME) {
                 tvs[0].tv_sec = attr.st_atime;
                 tvs[0].tv_nsec = attr.st_atime_nsec;
+                // Update stat structure with known timestamp
+                updated_stat.st_atime = attr.st_atime;
+                updated_stat.st_atime_nsec = attr.st_atime_nsec;
             }
 
             if valid.contains(SetattrValid::MTIME_NOW) {
@@ -1760,6 +1781,9 @@ impl OverlayFs {
             } else if valid.contains(SetattrValid::MTIME) {
                 tvs[1].tv_sec = attr.st_mtime;
                 tvs[1].tv_nsec = attr.st_mtime_nsec;
+                // Update stat structure with known timestamp
+                updated_stat.st_mtime = attr.st_mtime;
+                updated_stat.st_mtime_nsec = attr.st_mtime_nsec;
             }
 
             // Safe because this doesn't modify any memory and we check the return value
@@ -1779,7 +1803,12 @@ impl OverlayFs {
         }
 
         // Return the updated attributes and timeout
-        self.do_getattr(inode)
+        // Only call do_getattr if we have dynamic timestamps that we can't predict
+        if has_dynamic_timestamps {
+            self.do_getattr(inode)
+        } else {
+            Ok((updated_stat, self.config.attr_timeout))
+        }
     }
 
     /// Performs a mkdir operation
@@ -2074,7 +2103,6 @@ impl OverlayFs {
         // Get and ensure new parent is in top layer
         let new_parent_data = self.ensure_top_layer(self.get_inode_data(new_parent)?)?;
 
-
         let dst_path =
             self.dev_ino_and_name_to_vol_path(new_parent_data.dev, new_parent_data.ino, new_name)?;
 
@@ -2322,7 +2350,8 @@ impl OverlayFs {
             // Remove the owner/permissions attribute from the list of attributes
             for attr in buf.split(|c| *c == 0) {
                 if attr.is_empty()
-                    || attr.starts_with(&OVERRIDE_STAT_XATTR_KEY[..OVERRIDE_STAT_XATTR_KEY.len() - 1])
+                    || attr
+                        .starts_with(&OVERRIDE_STAT_XATTR_KEY[..OVERRIDE_STAT_XATTR_KEY.len() - 1])
                 {
                     continue;
                 }
@@ -2858,7 +2887,7 @@ impl FileSystem for OverlayFs {
                 attr_flags: 0,
                 attr_timeout: self.config.attr_timeout,
                 entry_timeout: self.config.entry_timeout,
-            })
+            });
         }
 
         let (entry, _) = self.do_lookup(parent, name)?;
@@ -3224,7 +3253,8 @@ impl FileSystem for OverlayFs {
         extensions: Extensions,
     ) -> io::Result<(Entry, Option<Self::Handle>, OpenOptions)> {
         Self::validate_name(name)?;
-        let (entry, handle, opts) = self.do_create(ctx, parent, name, mode, flags, umask, extensions)?;
+        let (entry, handle, opts) =
+            self.do_create(ctx, parent, name, mode, flags, umask, extensions)?;
         self.bump_refcount(entry.inode);
         Ok((entry, handle, opts))
     }
