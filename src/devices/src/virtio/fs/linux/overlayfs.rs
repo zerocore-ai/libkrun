@@ -1,3 +1,4 @@
+//! # Linux OverlayFS Implementation
 use std::{
     collections::{btree_map, BTreeMap, HashSet},
     ffi::{CStr, CString},
@@ -18,6 +19,7 @@ use std::{
 
 use caps::{has_cap, CapSet, Capability};
 use intaglio::{cstr::SymbolTable, Symbol};
+use log::debug;
 use nix::{request_code_none, request_code_read};
 
 use crate::virtio::{
@@ -484,10 +486,39 @@ impl OverlayFs {
             let c_path = CString::new(layer_path.to_string_lossy().as_bytes())?;
 
             // Open the directory
-            let file = Self::open_path_file(&c_path)?;
+            let fd = unsafe {
+                libc::open(
+                    c_path.as_ptr(),
+                    libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                    0,
+                )
+            };
+            let file = if fd >= 0 {
+                unsafe { File::from_raw_fd(fd) }
+            } else {
+                let err = io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::ELOOP) {
+                    // Retry with O_PATH to get the symlink fd itself
+                    let symlink_fd = unsafe {
+                        libc::open(
+                            c_path.as_ptr(),
+                            libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                            0,
+                        )
+                    };
+                    if symlink_fd >= 0 {
+                        unsafe { File::from_raw_fd(symlink_fd) }
+                    } else {
+                        return Err(err);
+                    }
+                } else {
+                    return Err(err);
+                }
+            };
 
-            // Get statx information
-            let (st, mnt_id) = Self::statx(file.as_raw_fd(), None)?;
+            // Get statx information. We only need the inode number and device ID from the statx
+            // structure.
+            let (st, mnt_id) = Self::unpatched_statx(file.as_raw_fd(), None)?;
 
             // Create the alt key for this inode
             let alt_key = InodeAltKey::new(st.st_ino, st.st_dev, mnt_id);
@@ -516,9 +547,49 @@ impl OverlayFs {
         Ok(layer_roots)
     }
 
-    /// Opens a file without following symlinks.
-    fn open_file(path: &CStr, flags: i32) -> io::Result<File> {
-        let fd = unsafe { libc::open(path.as_ptr(), flags | libc::O_NOFOLLOW, 0) };
+    /// Adjusts flags for writeback caching requirements in VM virtualization contexts.
+    fn adjust_flags_for_writeback(&self, mut flags: i32) -> i32 {
+        let writeback = self.writeback.load(Ordering::Relaxed);
+        
+        // For VM virtualization with writeback caching: convert O_WRONLY to O_RDWR
+        // because the kernel may send read requests even if the userspace program opened
+        // the file write-only. This prevents EBADF errors in the VM guest.
+        if writeback && flags & libc::O_ACCMODE == libc::O_WRONLY {
+            flags &= !libc::O_ACCMODE;
+            flags |= libc::O_RDWR;
+        }
+
+        // For VM virtualization with writeback caching: clear O_APPEND to prevent
+        // race conditions between the guest's cached view and the actual file state
+        // on the host. The kernel's cached end-of-file offset may be stale.
+        if writeback && flags & libc::O_APPEND != 0 {
+            flags &= !libc::O_APPEND;
+        }
+
+        flags
+    }
+
+    /// Turns an inode into an opened file.
+    fn open_inode(&self, inode: Inode, mut flags: i32) -> io::Result<File> {
+        let data = self.get_inode_data(inode)?;
+        let fd_str = Self::fd_to_fd_str(data.file.as_raw_fd())?;
+
+        flags = self.adjust_flags_for_writeback(flags);
+
+        // If the file is a symlink, just clone existing file.
+        if data.file.metadata()?.is_symlink() {
+            return Ok(data.file.try_clone()?);
+        }
+
+        // It is safe to follow here since symlinks are returned early as O_PATH files.
+        let fd = unsafe {
+            libc::openat(
+                self.proc_self_fd.as_raw_fd(),
+                fd_str.as_ptr(),
+                flags | libc::O_CLOEXEC & (!libc::O_NOFOLLOW),
+            )
+        };
+
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -527,33 +598,112 @@ impl OverlayFs {
         Ok(unsafe { File::from_raw_fd(fd) })
     }
 
-    /// Opens a file relative to a parent without following symlinks.
-    fn open_file_at(parent: RawFd, name: &CStr, flags: i32) -> io::Result<File> {
-        let fd = unsafe { libc::openat(parent, name.as_ptr(), flags | libc::O_NOFOLLOW, 0) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
+    /// Opens a file from a path, handling symlinks properly.
+    /// Returns (File, is_symlink) where is_symlink indicates if the file is a symlink.
+    fn open_file(&self, path: &CStr, mut flags: i32) -> io::Result<(File, bool)> {
+        flags = self.adjust_flags_for_writeback(flags);
+
+        // First attempt: try to open with security flags for VM virtualization:
+        // - O_NOFOLLOW: Prevents symlink traversal attacks where malicious guests could
+        //   escape the virtualized filesystem by creating symlinks to host paths
+        // - O_CLOEXEC: Ensures file descriptors don't leak to child processes, preventing
+        //   potential privilege escalation or information disclosure
+        // If the target is a symlink, this will fail with ELOOP.
+        let fd = unsafe {
+            libc::open(
+                path.as_ptr(),
+                flags | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                0
+            )
+        };
+
+        if fd >= 0 {
+            // Success - return the opened file (not a symlink)
+            return Ok((unsafe { File::from_raw_fd(fd) }, false));
         }
 
-        // Safe because we just opened this fd.
-        Ok(unsafe { File::from_raw_fd(fd) })
+        let err = io::Error::last_os_error();
+
+        // If we got ELOOP, it means we encountered a symlink
+        if err.raw_os_error() == Some(libc::ELOOP) {
+            // For symlinks, we open with additional security flags for VM virtualization:
+            // - O_PATH: Get a file descriptor to the symlink itself without following it,
+            //   allows metadata operations while maintaining security boundaries
+            // - O_NOFOLLOW: Still prevent following symlinks (defense in depth)
+            // - O_CLOEXEC: Prevent fd leaks to child processes
+            let symlink_fd = unsafe {
+                libc::open(
+                    path.as_ptr(),
+                    flags | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_PATH,
+                    0,
+                )
+            };
+
+            if symlink_fd >= 0 {
+                return Ok((unsafe { File::from_raw_fd(symlink_fd) }, true));
+            }
+        }
+
+        // Return the original error if we couldn't handle it
+        Err(err)
     }
 
-    /// Opens a path as an O_PATH file.
-    fn open_path_file(path: &CStr) -> io::Result<File> {
-        Self::open_file(path, libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-    }
+    /// Opens a file relative to a parent, handling symlinks properly.
+    /// Returns (File, is_symlink) where is_symlink indicates if the file is a symlink.
+    fn open_file_at(&self, parent: RawFd, name: &CStr, mut flags: i32) -> io::Result<(File, bool)> {
+        flags = self.adjust_flags_for_writeback(flags);
 
-    /// Opens a path relative to a parent as an O_PATH file.
-    fn open_path_file_at(parent: RawFd, name: &CStr) -> io::Result<File> {
-        Self::open_file_at(
-            parent,
-            name,
-            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
+        // First attempt: try to open with security flags for VM virtualization:
+        // - openat() with parent fd: Restricts access to within the parent directory,
+        //   preventing directory traversal attacks (e.g., "../../../etc/passwd")
+        // - O_NOFOLLOW: Prevents symlink traversal attacks where malicious guests could
+        //   escape the virtualized filesystem by creating symlinks to host paths
+        // - O_CLOEXEC: Ensures file descriptors don't leak to child processes, preventing
+        //   potential privilege escalation or information disclosure
+        let fd = unsafe {
+            libc::openat(
+                parent,
+                name.as_ptr(),
+                flags | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                0,
+            )
+        };
+
+        if fd >= 0 {
+            // Success - return the opened file (not a symlink)
+            return Ok((unsafe { File::from_raw_fd(fd) }, false));
+        }
+
+        let err = io::Error::last_os_error();
+
+        // If we got ELOOP, it means we encountered a symlink
+        if err.raw_os_error() == Some(libc::ELOOP) {
+            // For symlinks, we open with additional security flags for VM virtualization:
+            // - O_PATH: Get a file descriptor to the symlink itself without following it,
+            //   allows metadata operations while maintaining security boundaries
+            // - O_NOFOLLOW: Still prevent following symlinks (defense in depth)
+            // - O_CLOEXEC: Prevent fd leaks to child processes
+            // - openat() with parent fd: Maintains directory traversal protection
+            let symlink_fd = unsafe {
+                libc::openat(
+                    parent,
+                    name.as_ptr(),
+                    flags | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_PATH,
+                    0,
+                )
+            };
+
+            if symlink_fd >= 0 {
+                return Ok((unsafe { File::from_raw_fd(symlink_fd) }, true));
+            }
+        }
+
+        // Return the original error if we couldn't handle it
+        Err(err)
     }
 
     /// Performs a statx syscall without any modifications to the returned stat structure.
-    fn statx(fd: RawFd, name: Option<&CStr>) -> io::Result<(libc::stat64, u64)> {
+    fn unpatched_statx(fd: RawFd, name: Option<&CStr>) -> io::Result<(libc::stat64, u64)> {
         let mut stx = MaybeUninit::<libc::statx>::zeroed();
         let res = unsafe {
             libc::statx(
@@ -598,66 +748,218 @@ impl OverlayFs {
         Ok((st, stx.stx_mnt_id))
     }
 
-    /// Turns an inode data into a file descriptor string.
-    fn data_to_fd_str(data: &InodeData) -> io::Result<CString> {
-        let fd = format!("{}", data.file.as_raw_fd());
+    /// Performs a statx syscall with extended attributes patching.
+    ///
+    /// This function first calls the standard statx syscall to get basic file metadata,
+    /// then attempts to retrieve and apply any override attributes stored in extended
+    /// attributes. This allows container runtimes to override file ownership and
+    /// permissions without modifying the actual filesystem.
+    ///
+    /// ## Arguments
+    /// * `fd` - File descriptor to get stats for
+    /// * `name` - Optional filename relative to fd (use None for the fd itself)
+    ///
+    /// ## Returns
+    /// * `Ok((stat, mnt_id))` - The potentially patched stat structure and mount ID
+    /// * `Err(io::Error)` - If the statx syscall fails
+    fn patched_statx(&self, fd: RawFd, name: Option<&CStr>) -> io::Result<(libc::stat64, u64)> {
+        let (mut stat, mnt_id) = Self::unpatched_statx(fd, name)?;
+
+        // Get owner and permissions from xattr
+        if let Ok(Some((uid, gid, mode))) = self.get_override_xattr(fd, &stat) {
+            // Update the stat with the xattr values if available
+            stat.st_uid = uid;
+            stat.st_gid = gid;
+
+            // Make sure we only modify the permission bits (lower 12 bits)
+            stat.st_mode = (stat.st_mode & !0o7777) | mode;
+        }
+
+        Ok((stat, mnt_id))
+    }
+
+    /// Retrieves override attributes from extended attributes.
+    fn get_override_xattr(
+        &self,
+        fd: RawFd,
+        st: &libc::stat64,
+    ) -> io::Result<Option<(u32, u32, u32)>> {
+        // Check if this file type supports xattr
+        let file_type = st.st_mode & libc::S_IFMT;
+        let supports_xattr = match file_type {
+            libc::S_IFREG | libc::S_IFDIR | libc::S_IFLNK => true,
+            libc::S_IFIFO | libc::S_IFSOCK | libc::S_IFBLK | libc::S_IFCHR => false,
+            _ => true, // Default to trying for unknown types
+        };
+
+        if !supports_xattr {
+            return Ok(None);
+        }
+
+        // Try to get the owner and permissions from xattr
+        let mut buf: Vec<u8> = vec![0; 32];
+
+        // Helper function to convert byte slice to u32 value
+        fn item_to_value(item: &[u8], radix: u32) -> Option<u32> {
+            match std::str::from_utf8(item) {
+                Ok(val) => match u32::from_str_radix(val, radix) {
+                    Ok(i) => Some(i),
+                    Err(_) => None,
+                },
+                Err(_) => None,
+            }
+        }
+
+        // Get the path for this fd and try to open it properly
+        let proc_path = Self::fd_to_path(fd)?;
+
+        let (file, is_symlink) = self.open_file(&proc_path, libc::O_RDONLY | libc::O_NONBLOCK)?;
+
+        let res = if is_symlink {
+            // For symlinks, we must use lgetxattr on the path directly because:
+            // 1. The fd returned by open_file is an O_PATH fd (metadata-only)
+            // 2. fgetxattr doesn't work on O_PATH fds for symlinks
+            // 3. We need to read xattrs from the symlink itself, not its target
+            unsafe {
+                libc::lgetxattr(
+                    proc_path.as_ptr(),
+                    OVERRIDE_STAT_XATTR_KEY.as_ptr() as *const i8,
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    buf.len(),
+                )
+            }
+        } else {
+            // For regular files/directories, use fgetxattr on the file descriptor
+            unsafe {
+                libc::fgetxattr(
+                    file.as_raw_fd(),
+                    OVERRIDE_STAT_XATTR_KEY.as_ptr() as *const i8,
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    buf.len(),
+                )
+            }
+        };
+
+        if res < 0 {
+            let err = io::Error::last_os_error();
+            // If the xattr is not set, return None
+            if err.raw_os_error() == Some(libc::ENODATA) {
+                return Ok(None);
+            }
+
+            // For symlinks, if xattrs aren't supported, return None (no override)
+            if err.raw_os_error() == Some(libc::EPERM) {
+                return Ok(None);
+            }
+
+            return Err(err);
+        }
+
+        // Truncate buffer to actual data length
+        let len = res as usize;
+        buf.truncate(len);
+
+        // Parse the xattr value - expected format is "uid:gid:mode"
+        let parts: Vec<&[u8]> = buf.split(|&b| b == b':').collect();
+        if parts.len() != 3 {
+            return Ok(None);
+        }
+
+        // Parse each component, falling back to original stat values on parse failure
+        let uid = item_to_value(parts[0], 10).unwrap_or(st.st_uid);
+        let gid = item_to_value(parts[1], 10).unwrap_or(st.st_gid);
+        let mode = item_to_value(parts[2], 8).unwrap_or(st.st_mode);
+
+        Ok(Some((uid, gid, mode)))
+    }
+
+    /// Sets the override attributes in extended attributes.
+    fn set_override_xattr(
+        &self,
+        fd: RawFd,
+        st: &libc::stat64,
+        owner: Option<(u32, u32)>,
+        mode: Option<u32>,
+    ) -> io::Result<()> {
+        // Check if this file type supports xattr
+        let file_type = st.st_mode & libc::S_IFMT;
+        let supports_xattr = match file_type {
+            libc::S_IFREG | libc::S_IFDIR | libc::S_IFLNK => true,
+            libc::S_IFIFO | libc::S_IFSOCK | libc::S_IFBLK | libc::S_IFCHR => false,
+            _ => true, // Default to trying for unknown types
+        };
+
+        if !supports_xattr {
+            return Ok(());
+        }
+
+        // Get the current values to use as defaults
+        let (uid, gid) = if let Some((uid, gid)) = owner {
+            (uid, gid)
+        } else {
+            (st.st_uid, st.st_gid)
+        };
+
+        let mode = mode.unwrap_or(st.st_mode);
+
+        // Format the xattr value
+        let value = format!("{}:{}:{:o}", uid, gid, mode & 0o7777);
+        let value_bytes = value.as_bytes();
+
+        // Get the path for this fd and try to open it properly
+        let proc_path = Self::fd_to_path(fd)?;
+
+        let (file, is_symlink) = self.open_file(&proc_path, libc::O_RDONLY | libc::O_NONBLOCK)?;
+
+        let res = if is_symlink {
+            // For symlinks, we must use lsetxattr on the path directly because:
+            // 1. The fd returned by open_file is an O_PATH fd (metadata-only)
+            // 2. fsetxattr doesn't work on O_PATH fds for symlinks
+            // 3. We need to set xattrs on the symlink itself, not its target
+            unsafe {
+                libc::lsetxattr(
+                    proc_path.as_ptr(),
+                    OVERRIDE_STAT_XATTR_KEY.as_ptr() as *const i8,
+                    value_bytes.as_ptr() as *const libc::c_void,
+                    value_bytes.len(),
+                    0,
+                )
+            }
+        } else {
+            // For regular files/directories, use fsetxattr on the file descriptor
+            unsafe {
+                libc::fsetxattr(
+                    file.as_raw_fd(),
+                    OVERRIDE_STAT_XATTR_KEY.as_ptr() as *const i8,
+                    value_bytes.as_ptr() as *const libc::c_void,
+                    value_bytes.len(),
+                    0,
+                )
+            }
+        };
+
+        if res < 0 {
+            let err = io::Error::last_os_error();
+            // For symlinks, many filesystems don't support xattrs - handle gracefully
+            if err.raw_os_error() == Some(libc::EPERM) {
+                debug!("Filesystem doesn't support xattrs on this file type, continuing without virtualized ownership");
+                return Ok(());
+            }
+            return Err(err);
+        }
+        return Ok(());
+    }
+
+    /// Turns an fd into a file descriptor string.
+    fn fd_to_fd_str(fd: RawFd) -> io::Result<CString> {
+        let fd = format!("{}", fd);
         CString::new(fd).map_err(|_| einval())
     }
 
-    /// Turns an inode data into a path.
-    fn data_to_path(data: &InodeData) -> io::Result<CString> {
-        let path = format!("/proc/self/fd/{}", data.file.as_raw_fd());
+    /// Turns an fd into a "/proc/self/fd/<fd>" path.
+    fn fd_to_path(fd: RawFd) -> io::Result<CString> {
+        let path = format!("/proc/self/fd/{}", fd);
         CString::new(path).map_err(|_| einval())
-    }
-
-    /// Turns an inode into an opened file.
-    fn open_inode(&self, inode: Inode, mut flags: i32) -> io::Result<File> {
-        let data = self.get_inode_data(inode)?;
-        let fd_str = Self::data_to_fd_str(&data)?;
-
-        // When writeback caching is enabled, the kernel may send read requests even if the
-        // userspace program opened the file write-only. So we need to ensure that we have opened
-        // the file for reading as well as writing.
-        let writeback = self.writeback.load(Ordering::Relaxed);
-        if writeback && flags & libc::O_ACCMODE == libc::O_WRONLY {
-            flags &= !libc::O_ACCMODE;
-            flags |= libc::O_RDWR;
-        }
-
-        // When writeback caching is enabled the kernel is responsible for handling `O_APPEND`.
-        // However, this breaks atomicity as the file may have changed on disk, invalidating the
-        // cached copy of the data in the kernel and the offset that the kernel thinks is the end of
-        // the file. Just allow this for now as it is the user's responsibility to enable writeback
-        // caching only for directories that are not shared. It also means that we need to clear the
-        // `O_APPEND` flag.
-        if writeback && flags & libc::O_APPEND != 0 {
-            flags &= !libc::O_APPEND;
-        }
-
-        // If the file is a symlink, just clone existing file.
-        if data.file.metadata()?.is_symlink() {
-            return Ok(data.file.try_clone()?);
-        }
-
-        // Safe because this doesn't modify any memory and we check the return value. We don't
-        // really check `flags` because if the kernel can't handle poorly specified flags then we
-        // have much bigger problems.
-        //
-        // It is safe to follow here since symlinks are returned early as O_PATH files.
-        let fd = unsafe {
-            libc::openat(
-                self.proc_self_fd.as_raw_fd(),
-                fd_str.as_ptr(),
-                flags | libc::O_CLOEXEC & (!libc::O_NOFOLLOW),
-            )
-        };
-
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        // Safe because we just opened this fd.
-        Ok(unsafe { File::from_raw_fd(fd) })
     }
 
     /// Turns an inode into an opened file or a path.
@@ -666,7 +968,7 @@ impl OverlayFs {
             Ok(file) => Ok(FileOrPath::File(file)),
             Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
                 let data = self.get_inode_data(inode)?;
-                let path = Self::data_to_path(&data)?;
+                let path = Self::fd_to_path(data.file.as_raw_fd())?;
                 Ok(FileOrPath::Path(path))
             }
             Err(e) => Err(e),
@@ -755,7 +1057,7 @@ impl OverlayFs {
     fn check_whiteout(&self, parent: RawFd, name: &CStr) -> io::Result<bool> {
         let whiteout_cpath = self.create_whiteout_path(name)?;
 
-        match Self::statx(parent, Some(&whiteout_cpath)) {
+        match Self::unpatched_statx(parent, Some(&whiteout_cpath)) {
             Ok(_) => Ok(true),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(e),
@@ -766,7 +1068,7 @@ impl OverlayFs {
     fn check_opaque_marker(&self, parent: RawFd) -> io::Result<bool> {
         let opaque_cpath = CString::new(OPAQUE_MARKER).map_err(|_| einval())?;
 
-        match Self::statx(parent, Some(&opaque_cpath)) {
+        match Self::unpatched_statx(parent, Some(&opaque_cpath)) {
             Ok(_) => Ok(true),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(e),
@@ -929,7 +1231,7 @@ impl OverlayFs {
         };
 
         // Set current.
-        let mut current = match Self::statx(root_file.as_raw_fd(), None) {
+        let mut current = match self.patched_statx(root_file.as_raw_fd(), None) {
             Ok((stat, mnt_id)) => (root_file, stat, mnt_id),
             Err(e) => return Some(Err(e)),
         };
@@ -966,12 +1268,13 @@ impl OverlayFs {
 
             drop(filenames); // Now safe to drop filenames lock
 
-            match Self::statx(current.0.as_raw_fd(), Some(&segment_name)) {
+            match self.patched_statx(current.0.as_raw_fd(), Some(&segment_name)) {
                 Ok((st, mnt_id)) => {
                     // Open the current segment
                     let new_file =
-                        match Self::open_path_file_at(current.0.as_raw_fd(), &segment_name) {
-                            Ok(file) => file,
+                        match self.open_file_at(current.0.as_raw_fd(), &segment_name, libc::O_PATH)
+                        {
+                            Ok((file, _)) => file,
                             Err(e) => {
                                 return Some(Err(e));
                             }
@@ -1167,7 +1470,7 @@ impl OverlayFs {
                 filenames.get(*name).unwrap().to_owned()
             };
 
-            let (src_stat, _) = Self::statx(inode_data.file.as_raw_fd(), None)?;
+            let (src_stat, _) = self.patched_statx(inode_data.file.as_raw_fd(), None)?;
             let file_type = src_stat.st_mode & libc::S_IFMT;
 
             // Copy up the file
@@ -1177,7 +1480,7 @@ impl OverlayFs {
                     let src_file = self.open_inode(inode_data.inode, libc::O_RDONLY)?;
 
                     // Open destination file with O_WRONLY | O_CREAT
-                    let dst_file = Self::open_file_at(
+                    let (dst_file, _) = self.open_file_at(
                         parent.as_raw_fd(),
                         &segment_name,
                         libc::O_WRONLY | libc::O_CREAT,
@@ -1270,8 +1573,8 @@ impl OverlayFs {
             }
 
             // Update parent for next iteration
-            let child = Self::open_path_file_at(parent.as_raw_fd(), &segment_name)?;
-            let (new_stat, new_mnt_id) = Self::statx(child.as_raw_fd(), None)?;
+            let child = self.open_file_at(parent.as_raw_fd(), &segment_name, libc::O_PATH)?.0;
+            let (new_stat, new_mnt_id) = Self::unpatched_statx(child.as_raw_fd(), None)?;
             parent = child.try_clone()?;
 
             // Update the inode entry to point to the new copy in the top layer
@@ -1618,8 +1921,21 @@ impl OverlayFs {
         // Create the directory
         let res = unsafe { libc::mkdirat(parent_fd, name.as_ptr(), mode & !umask) };
         if res == 0 {
-            let file = Self::open_path_file_at(parent_fd, name)?;
-            let (stat, mnt_id) = Self::statx(file.as_raw_fd(), None)?;
+            let file = self.open_file_at(parent_fd, name, libc::O_PATH)?.0;
+
+            // Get initial stat.
+            let (stat, _) = Self::unpatched_statx(file.as_raw_fd(), None)?;
+
+            // Set ownership and permissions
+            self.set_override_xattr(
+                file.as_raw_fd(),
+                &stat,
+                Some((ctx.uid, ctx.gid)),
+                Some(mode & !umask),
+            )?;
+
+            // Get updated stat
+            let (updated_stat, mnt_id) = self.patched_statx(file.as_raw_fd(), None)?;
 
             let mut path = parent_data.path.clone();
             path.push(self.intern_name(name)?);
@@ -1627,15 +1943,15 @@ impl OverlayFs {
             // Create the inode for the newly created directory
             let (inode, _) = self.create_inode(
                 file,
-                stat.st_ino,
-                stat.st_dev,
+                updated_stat.st_ino,
+                updated_stat.st_dev,
                 mnt_id,
                 path,
                 parent_data.layer_idx,
             );
 
             // Create the entry for the newly created directory
-            let entry = self.create_entry(inode, stat);
+            let entry = self.create_entry(inode, updated_stat);
 
             return Ok(entry);
         }
@@ -1718,7 +2034,7 @@ impl OverlayFs {
                 match self.lookup_segment_by_segment(&layer_root, &path, &mut path_inodes) {
                     Some(Ok(_)) => {
                         let last_inode = path_inodes.last().unwrap();
-                        let path = Self::data_to_path(last_inode)?;
+                        let path = Self::fd_to_path(last_inode.file.as_raw_fd())?;
                         let dir_str = path.as_c_str().to_str().map_err(|_| {
                             io::Error::new(io::ErrorKind::Other, "Invalid path string")
                         })?;
@@ -1903,7 +2219,19 @@ impl OverlayFs {
             return Err(io::Error::last_os_error());
         }
 
-        let (stat, mnt_id) = Self::statx(fd, None)?;
+        // Get initial stat.
+        let (stat, _) = Self::unpatched_statx(fd, None)?;
+
+        // Set ownership and permissions
+        self.set_override_xattr(
+            fd,
+            &stat,
+            Some((ctx.uid, ctx.gid)),
+            Some(libc::S_IFREG | (mode & !(umask & 0o777))),
+        )?;
+
+        // Get updated stat
+        let (updated_stat, mnt_id) = self.patched_statx(fd, None)?;
 
         let mut path = parent_data.path.clone();
         path.push(self.intern_name(name)?);
@@ -1912,15 +2240,15 @@ impl OverlayFs {
         let file = unsafe { File::from_raw_fd(fd) };
         let (inode, _) = self.create_inode(
             file.try_clone()?,
-            stat.st_ino,
-            stat.st_dev,
+            updated_stat.st_ino,
+            updated_stat.st_dev,
             mnt_id,
             path,
             parent_data.layer_idx,
         );
 
         // Create the entry for the newly created file
-        let entry = self.create_entry(inode, stat);
+        let entry = self.create_entry(inode, updated_stat);
 
         // Create the handle for the newly created file
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
@@ -1944,9 +2272,156 @@ impl OverlayFs {
 
     fn do_getattr(&self, inode: Inode) -> io::Result<(libc::stat64, Duration)> {
         let fd = self.get_inode_data(inode)?.file.as_raw_fd();
-        let (st, _) = Self::statx(fd, None)?;
+        let (st, _) = self.patched_statx(fd, None)?;
 
         Ok((st, self.config.attr_timeout))
+    }
+
+    fn do_setattr(
+        &self,
+        inode: Inode,
+        attr: libc::stat64,
+        handle: Option<Handle>,
+        valid: SetattrValid,
+    ) -> io::Result<(libc::stat64, Duration)> {
+        // Get the inode data
+        let inode_data = self.get_inode_data(inode)?;
+
+        // Ensure the file is in the top layer before modifying attributes
+        let inode_data = self.ensure_top_layer(inode_data)?;
+
+        // Get the file identifier - either from handle or path
+        let file_id = if let Some(handle) = handle {
+            // Get the handle data
+            let handles = self.handles.read().unwrap();
+            let handle_data = handles.get(&handle).ok_or_else(ebadf)?;
+            let file = handle_data.file.read().unwrap();
+            FileId::Fd(file.as_raw_fd())
+        } else {
+            let fd_str = Self::fd_to_fd_str(inode_data.file.as_raw_fd())?;
+            FileId::Path(fd_str)
+        };
+
+        let mut updated_stat = self.patched_statx(inode_data.file.as_raw_fd(), None)?.0;
+
+        // Handle ownership and mode changes together
+        let needs_xattr_update =
+            valid.intersects(SetattrValid::UID | SetattrValid::GID | SetattrValid::MODE);
+
+        if needs_xattr_update {
+            let owner = if valid.intersects(SetattrValid::UID | SetattrValid::GID) {
+                let uid = if valid.contains(SetattrValid::UID) {
+                    attr.st_uid
+                } else {
+                    updated_stat.st_uid
+                };
+
+                let gid = if valid.contains(SetattrValid::GID) {
+                    attr.st_gid
+                } else {
+                    updated_stat.st_gid
+                };
+
+                Some((uid, gid))
+            } else {
+                None
+            };
+
+            let mode = if valid.contains(SetattrValid::MODE) {
+                Some(attr.st_mode)
+            } else {
+                None
+            };
+
+            // Update extended attributes with new ownership/mode
+            self.set_override_xattr(inode_data.file.as_raw_fd(), &updated_stat, owner, mode)?;
+
+            // Update the stat structure with new values
+            if let Some((uid, gid)) = owner {
+                updated_stat.st_uid = uid;
+                updated_stat.st_gid = gid;
+            }
+            if let Some(mode) = mode {
+                updated_stat.st_mode = mode;
+            }
+        }
+
+        // Handle size changes
+        if valid.contains(SetattrValid::SIZE) {
+            // Safe because this doesn't modify any memory and we check the return value.
+            let res = match file_id {
+                FileId::Fd(fd) => unsafe { libc::ftruncate(fd, attr.st_size) },
+                _ => {
+                    // There is no `ftruncateat` so we need to get a new fd and truncate it.
+                    let f = self.open_inode(inode, libc::O_NONBLOCK | libc::O_RDWR)?;
+                    unsafe { libc::ftruncate(f.as_raw_fd(), attr.st_size) }
+                }
+            };
+
+            if res < 0 {
+                return Err(io::Error::last_os_error());
+            }
+
+            // Update the stat structure with the new size
+            updated_stat.st_size = attr.st_size;
+        }
+
+        // Handle timestamp changes
+        let has_dynamic_timestamps =
+            valid.contains(SetattrValid::ATIME_NOW) || valid.contains(SetattrValid::MTIME_NOW);
+
+        if valid.intersects(SetattrValid::ATIME | SetattrValid::MTIME) {
+            let mut tvs = [
+                libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: libc::UTIME_OMIT,
+                },
+                libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: libc::UTIME_OMIT,
+                },
+            ];
+
+            if valid.contains(SetattrValid::ATIME_NOW) {
+                tvs[0].tv_nsec = libc::UTIME_NOW;
+            } else if valid.contains(SetattrValid::ATIME) {
+                tvs[0].tv_sec = attr.st_atime;
+                tvs[0].tv_nsec = attr.st_atime_nsec;
+                // Update stat structure with known timestamp
+                updated_stat.st_atime = attr.st_atime;
+                updated_stat.st_atime_nsec = attr.st_atime_nsec;
+            }
+
+            if valid.contains(SetattrValid::MTIME_NOW) {
+                tvs[1].tv_nsec = libc::UTIME_NOW;
+            } else if valid.contains(SetattrValid::MTIME) {
+                tvs[1].tv_sec = attr.st_mtime;
+                tvs[1].tv_nsec = attr.st_mtime_nsec;
+                // Update stat structure with known timestamp
+                updated_stat.st_mtime = attr.st_mtime;
+                updated_stat.st_mtime_nsec = attr.st_mtime_nsec;
+            }
+
+            // Safe because this doesn't modify any memory and we check the return value
+            let res = match file_id {
+                FileId::Fd(fd) => unsafe { libc::futimens(fd, tvs.as_ptr()) },
+                FileId::Path(ref p) => unsafe {
+                    libc::utimensat(self.proc_self_fd.as_raw_fd(), p.as_ptr(), tvs.as_ptr(), 0)
+                },
+            };
+
+            if res < 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+
+        // Return the updated attributes and timeout
+        // Only call do_getattr if we have dynamic timestamps that we can't predict
+        if has_dynamic_timestamps {
+            self.do_getattr(inode)
+        } else {
+            Ok((updated_stat, self.config.attr_timeout))
+        }
     }
 
     fn do_rename(
@@ -2000,6 +2475,8 @@ impl OverlayFs {
             unimplemented!("SECURITY_CTX is not supported and should not be used by the guest");
         }
 
+        Self::validate_name(name)?;
+
         // Set the credentials for the operation
         let (_uid, _gid) = self.set_scoped_credentials(ctx.uid, ctx.gid)?;
 
@@ -2024,41 +2501,59 @@ impl OverlayFs {
         // Get the parent file descriptor
         let parent_fd = parent_data.file.as_raw_fd();
 
-        // Create the node device
+        // Create the node using mknodat
         let res = unsafe {
             libc::mknodat(
                 parent_fd,
                 name.as_ptr(),
-                (mode & !umask) as libc::mode_t,
-                u64::from(rdev),
+                mode & !(umask & 0o777),
+                rdev as libc::dev_t,
             )
         };
 
-        if res == 0 {
-            let file = Self::open_path_file_at(parent_fd, name)?;
-            let (stat, mnt_id) = Self::statx(file.as_raw_fd(), None)?;
-
-            let mut path = parent_data.path.clone();
-            path.push(self.intern_name(name)?);
-
-            // Create the inode for the newly created directory
-            let (inode, _) = self.create_inode(
-                file,
-                stat.st_ino,
-                stat.st_dev,
-                mnt_id,
-                path,
-                parent_data.layer_idx,
-            );
-
-            // Create the entry for the newly created directory
-            let entry = self.create_entry(inode, stat);
-
-            return Ok(entry);
+        if res < 0 {
+            return Err(io::Error::last_os_error());
         }
 
-        // Return the error
-        Err(io::Error::last_os_error())
+        // Open the newly created node using O_PATH to avoid hanging on special files
+        let file = self.open_file_at(parent_fd, name, libc::O_PATH)?.0;
+        let fd = file.as_raw_fd();
+
+        // Get initial stat
+        let (stat, _) = Self::unpatched_statx(fd, None)?;
+
+        // Set ownership and permissions via xattr
+        if let Err(e) = self.set_override_xattr(
+            fd,
+            &stat,
+            Some((ctx.uid, ctx.gid)),
+            Some(mode & !(umask & 0o777)),
+        ) {
+            // If xattr fails, log but continue - the function handles unsupported file types
+            debug!("Failed to set override xattr: {}", e);
+        }
+
+        // Get the updated stat (may be the same if xattr couldn't be set)
+        let (updated_stat, mnt_id) = self.patched_statx(fd, None)?;
+
+        let mut path = parent_data.path.clone();
+        path.push(self.intern_name(name)?);
+
+        // Create the inode for the newly created node
+        let (inode, _) = self.create_inode(
+            file.try_clone()?,
+            updated_stat.st_ino,
+            updated_stat.st_dev,
+            mnt_id,
+            path,
+            parent_data.layer_idx,
+        );
+
+        // Create the entry for the newly created node
+        let entry = self.create_entry(inode, updated_stat);
+
+        Ok(entry)
+        // todo!()
     }
 
     fn do_link(&self, inode: Inode, newparent: Inode, newname: &CStr) -> io::Result<Entry> {
@@ -2067,10 +2562,10 @@ impl OverlayFs {
 
         // Copy up the source file to the top layer if needed
         let inode_data = self.ensure_top_layer(inode_data)?;
-        let old_fd_str = Self::data_to_fd_str(&inode_data)?;
+        let old_fd_str = Self::fd_to_fd_str(inode_data.file.as_raw_fd())?;
 
         // Extraneous check to ensure the source file is not a symlink
-        let stat = Self::statx(inode_data.file.as_raw_fd(), None)?.0;
+        let (stat, _) = Self::unpatched_statx(inode_data.file.as_raw_fd(), None)?;
         if stat.st_mode & libc::S_IFMT == libc::S_IFLNK {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -2094,8 +2589,8 @@ impl OverlayFs {
         };
 
         if res == 0 {
-            let file = Self::open_path_file_at(new_parent_fd, newname)?;
-            let (stat, mnt_id) = Self::statx(file.as_raw_fd(), None)?;
+            let file = self.open_file_at(new_parent_fd, newname, libc::O_PATH)?.0;
+            let (stat, mnt_id) = self.patched_statx(file.as_raw_fd(), None)?;
 
             let mut path = new_parent_data.path.clone();
             path.push(self.intern_name(newname)?);
@@ -2160,8 +2655,21 @@ impl OverlayFs {
         let res = unsafe { libc::symlinkat(linkname.as_ptr(), parent_fd, name.as_ptr()) };
 
         if res == 0 {
-            let file = Self::open_path_file_at(parent_fd, name)?;
-            let (stat, mnt_id) = Self::statx(file.as_raw_fd(), None)?;
+            let file = self.open_file_at(parent_fd, name, libc::O_PATH)?.0;
+
+            // Get initial stat.
+            let (stat, _) = Self::unpatched_statx(file.as_raw_fd(), None)?;
+
+            // Set ownership and permissions
+            self.set_override_xattr(
+                file.as_raw_fd(),
+                &stat,
+                Some((ctx.uid, ctx.gid)),
+                Some(libc::S_IFLNK | 0777),
+            )?;
+
+            // Get updated stat
+            let (updated_stat, mnt_id) = self.patched_statx(file.as_raw_fd(), None)?;
 
             let mut path = parent_data.path.clone();
             path.push(self.intern_name(name)?);
@@ -2169,15 +2677,15 @@ impl OverlayFs {
             // Create the inode for the newly created directory
             let (inode, _) = self.create_inode(
                 file,
-                stat.st_ino,
-                stat.st_dev,
+                updated_stat.st_ino,
+                updated_stat.st_dev,
                 mnt_id,
                 path,
                 parent_data.layer_idx,
             );
 
             // Create the entry for the newly created directory
-            let entry = self.create_entry(inode, stat);
+            let entry = self.create_entry(inode, updated_stat);
 
             return Ok(entry);
         }
@@ -2943,132 +3451,7 @@ impl FileSystem for OverlayFs {
         handle: Option<Handle>,
         valid: SetattrValid,
     ) -> io::Result<(libc::stat64, Duration)> {
-        // Get the inode data
-        let inode_data = self.get_inode_data(inode)?;
-
-        // Ensure the file is in the top layer before modifying attributes
-        let inode_data = self.ensure_top_layer(inode_data)?;
-
-        // Get the file identifier - either from handle or path
-        let file_id = if let Some(handle) = handle {
-            // Get the handle data
-            let handles = self.handles.read().unwrap();
-            let handle_data = handles.get(&handle).ok_or_else(ebadf)?;
-            let file = handle_data.file.read().unwrap();
-            FileId::Fd(file.as_raw_fd())
-        } else {
-            let fd_str = Self::data_to_fd_str(&inode_data)?;
-            FileId::Path(fd_str)
-        };
-
-        // Handle mode changes
-        if valid.contains(SetattrValid::MODE) {
-            // Safe because this doesn't modify any memory and we check the return value.
-            let res = unsafe {
-                match file_id {
-                    FileId::Fd(fd) => libc::fchmod(fd, attr.st_mode),
-                    FileId::Path(ref p) => {
-                        libc::fchmodat(self.proc_self_fd.as_raw_fd(), p.as_ptr(), attr.st_mode, 0)
-                    }
-                }
-            };
-
-            if res < 0 {
-                return Err(io::Error::last_os_error());
-            }
-        }
-
-        // Handle ownership changes
-        if valid.intersects(SetattrValid::UID | SetattrValid::GID) {
-            let uid = if valid.contains(SetattrValid::UID) {
-                attr.st_uid
-            } else {
-                // Cannot use -1 here because these are unsigned values.
-                u32::MAX
-            };
-
-            let gid = if valid.contains(SetattrValid::GID) {
-                attr.st_gid
-            } else {
-                // Cannot use -1 here because these are unsigned values.
-                u32::MAX
-            };
-
-            // Safe because this doesn't modify any memory and we check the return value.
-            let res = unsafe {
-                libc::fchownat(
-                    inode_data.file.as_raw_fd(),
-                    EMPTY_CSTR.as_ptr(),
-                    uid,
-                    gid,
-                    libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW,
-                )
-            };
-
-            if res < 0 {
-                return Err(io::Error::last_os_error());
-            }
-        }
-
-        // Handle size changes
-        if valid.contains(SetattrValid::SIZE) {
-            // Safe because this doesn't modify any memory and we check the return value.
-            let res = match file_id {
-                FileId::Fd(fd) => unsafe { libc::ftruncate(fd, attr.st_size) },
-                _ => {
-                    // There is no `ftruncateat` so we need to get a new fd and truncate it.
-                    let f = self.open_inode(inode, libc::O_NONBLOCK | libc::O_RDWR)?;
-                    unsafe { libc::ftruncate(f.as_raw_fd(), attr.st_size) }
-                }
-            };
-
-            if res < 0 {
-                return Err(io::Error::last_os_error());
-            }
-        }
-
-        // Handle timestamp changes
-        if valid.intersects(SetattrValid::ATIME | SetattrValid::MTIME) {
-            let mut tvs = [
-                libc::timespec {
-                    tv_sec: 0,
-                    tv_nsec: libc::UTIME_OMIT,
-                },
-                libc::timespec {
-                    tv_sec: 0,
-                    tv_nsec: libc::UTIME_OMIT,
-                },
-            ];
-
-            if valid.contains(SetattrValid::ATIME_NOW) {
-                tvs[0].tv_nsec = libc::UTIME_NOW;
-            } else if valid.contains(SetattrValid::ATIME) {
-                tvs[0].tv_sec = attr.st_atime;
-                tvs[0].tv_nsec = attr.st_atime_nsec;
-            }
-
-            if valid.contains(SetattrValid::MTIME_NOW) {
-                tvs[1].tv_nsec = libc::UTIME_NOW;
-            } else if valid.contains(SetattrValid::MTIME) {
-                tvs[1].tv_sec = attr.st_mtime;
-                tvs[1].tv_nsec = attr.st_mtime_nsec;
-            }
-
-            // Safe because this doesn't modify any memory and we check the return value
-            let res = match file_id {
-                FileId::Fd(fd) => unsafe { libc::futimens(fd, tvs.as_ptr()) },
-                FileId::Path(ref p) => unsafe {
-                    libc::utimensat(self.proc_self_fd.as_raw_fd(), p.as_ptr(), tvs.as_ptr(), 0)
-                },
-            };
-
-            if res < 0 {
-                return Err(io::Error::last_os_error());
-            }
-        }
-
-        // Return the updated attributes and timeout
-        self.do_getattr(inode)
+        self.do_setattr(inode, attr, handle, valid)
     }
 
     fn rename(
@@ -3192,7 +3575,7 @@ impl FileSystem for OverlayFs {
         let inode_data = self.get_inode_data(inode)?;
         let fd = inode_data.file.as_raw_fd();
 
-        let (st, _) = Self::statx(fd, None)?;
+        let (st, _) = self.patched_statx(fd, None)?;
         let mode = mask as i32 & (libc::R_OK | libc::W_OK | libc::X_OK);
 
         if mode == libc::F_OK {
