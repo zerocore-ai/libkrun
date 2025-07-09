@@ -319,14 +319,6 @@ pub struct OverlayFs {
     layer_roots: Arc<RwLock<Vec<Inode>>>,
 }
 
-/// Represents either a file or a path
-enum FileOrPath {
-    /// A file
-    File(File),
-
-    /// A path
-    Path(CString),
-}
 
 /// Represents either a file descriptor or a path
 enum FileId {
@@ -570,7 +562,7 @@ impl OverlayFs {
     }
 
     /// Turns an inode into an opened file.
-    fn open_inode(&self, inode: Inode, mut flags: i32) -> io::Result<File> {
+    fn open_inode(&self, inode: Inode, mut flags: i32) -> io::Result<(File, bool)> {
         let data = self.get_inode_data(inode)?;
         let fd_str = Self::fd_to_fd_str(data.file.as_raw_fd())?;
 
@@ -578,7 +570,7 @@ impl OverlayFs {
 
         // If the file is a symlink, just clone existing file.
         if data.file.metadata()?.is_symlink() {
-            return Ok(data.file.try_clone()?);
+            return Ok((data.file.try_clone()?, true));
         }
 
         // It is safe to follow here since symlinks are returned early as O_PATH files.
@@ -595,7 +587,7 @@ impl OverlayFs {
         }
 
         // Safe because we just opened this fd.
-        Ok(unsafe { File::from_raw_fd(fd) })
+        Ok((unsafe { File::from_raw_fd(fd) }, false))
     }
 
     /// Opens a file from a path, handling symlinks properly.
@@ -962,18 +954,6 @@ impl OverlayFs {
         CString::new(path).map_err(|_| einval())
     }
 
-    /// Turns an inode into an opened file or a path.
-    fn open_inode_or_path(&self, inode: Inode, flags: i32) -> io::Result<FileOrPath> {
-        match self.open_inode(inode, flags) {
-            Ok(file) => Ok(FileOrPath::File(file)),
-            Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
-                let data = self.get_inode_data(inode)?;
-                let path = Self::fd_to_path(data.file.as_raw_fd())?;
-                Ok(FileOrPath::Path(path))
-            }
-            Err(e) => Err(e),
-        }
-    }
 
     pub fn get_config(&self) -> &Config {
         &self.config
@@ -1477,7 +1457,7 @@ impl OverlayFs {
             match file_type {
                 libc::S_IFREG => {
                     // Open source file with O_RDONLY
-                    let src_file = self.open_inode(inode_data.inode, libc::O_RDONLY)?;
+                    let (src_file, _) = self.open_inode(inode_data.inode, libc::O_RDONLY)?;
 
                     // Open destination file with O_WRONLY | O_CREAT
                     let (dst_file, _) = self.open_file_at(
@@ -1813,7 +1793,8 @@ impl OverlayFs {
         let inode_data = self.ensure_top_layer(inode_data)?;
 
         // Open the file with the appropriate flags and generate a new unique handle ID
-        let file = RwLock::new(self.open_inode(inode_data.inode, flags as i32)?);
+        let (file, _) = self.open_inode(inode_data.inode, flags as i32)?;
+        let file = RwLock::new(file);
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
 
         // Create handle data structure with file and empty dirstream
@@ -2353,7 +2334,7 @@ impl OverlayFs {
                 FileId::Fd(fd) => unsafe { libc::ftruncate(fd, attr.st_size) },
                 _ => {
                     // There is no `ftruncateat` so we need to get a new fd and truncate it.
-                    let f = self.open_inode(inode, libc::O_NONBLOCK | libc::O_RDWR)?;
+                    let (f, _) = self.open_inode(inode, libc::O_NONBLOCK | libc::O_RDWR)?;
                     unsafe { libc::ftruncate(f.as_raw_fd(), attr.st_size) }
                 }
             };
@@ -2735,33 +2716,31 @@ impl OverlayFs {
         // The f{set,get,remove,list}xattr functions don't work on an fd opened with `O_PATH` so we
         // need to get a new fd. This doesn't work for symlinks, so we use the l* family of
         // functions in that case.
-        let res =
-            match self.open_inode_or_path(inode_data.inode, libc::O_RDONLY | libc::O_NONBLOCK)? {
-                FileOrPath::File(file) => {
-                    // Safe because this doesn't modify any memory and we check the return value.
-                    unsafe {
-                        libc::fsetxattr(
-                            file.as_raw_fd(),
-                            name.as_ptr(),
-                            value.as_ptr() as *const libc::c_void,
-                            value.len(),
-                            flags as libc::c_int,
-                        )
-                    }
-                }
-                FileOrPath::Path(path) => {
-                    // Safe because this doesn't modify any memory and we check the return value.
-                    unsafe {
-                        libc::lsetxattr(
-                            path.as_ptr(),
-                            name.as_ptr(),
-                            value.as_ptr() as *const libc::c_void,
-                            value.len(),
-                            flags as libc::c_int,
-                        )
-                    }
-                }
-            };
+        let (file, is_symlink) = self.open_inode(inode_data.inode, libc::O_RDONLY | libc::O_NONBLOCK)?;
+        let res = if is_symlink {
+            // For symlinks, use lsetxattr on the proc path
+            let proc_path = Self::fd_to_path(file.as_raw_fd())?;
+            unsafe {
+                libc::lsetxattr(
+                    proc_path.as_ptr(),
+                    name.as_ptr(),
+                    value.as_ptr() as *const libc::c_void,
+                    value.len(),
+                    flags as libc::c_int,
+                )
+            }
+        } else {
+            // For regular files, use fsetxattr
+            unsafe {
+                libc::fsetxattr(
+                    file.as_raw_fd(),
+                    name.as_ptr(),
+                    value.as_ptr() as *const libc::c_void,
+                    value.len(),
+                    flags as libc::c_int,
+                )
+            }
+        };
 
         if res < 0 {
             return Err(io::Error::last_os_error());
@@ -2787,28 +2766,27 @@ impl OverlayFs {
         // The f{set,get,remove,list}xattr functions don't work on an fd opened with `O_PATH` so we
         // need to get a new fd. This doesn't work for symlinks, so we use the l* family of
         // functions in that case.
-        let res = match self.open_inode_or_path(inode, libc::O_RDONLY | libc::O_NONBLOCK)? {
-            FileOrPath::File(file) => {
-                // Safe because this will only modify the contents of `buf`.
-                unsafe {
-                    libc::fgetxattr(
-                        file.as_raw_fd(),
-                        name.as_ptr(),
-                        buf.as_mut_ptr() as *mut libc::c_void,
-                        size as libc::size_t,
-                    )
-                }
+        let (file, is_symlink) = self.open_inode(inode, libc::O_RDONLY | libc::O_NONBLOCK)?;
+        let res = if is_symlink {
+            // For symlinks, use lgetxattr on the proc path
+            let proc_path = Self::fd_to_path(file.as_raw_fd())?;
+            unsafe {
+                libc::lgetxattr(
+                    proc_path.as_ptr(),
+                    name.as_ptr(),
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    size as libc::size_t,
+                )
             }
-            FileOrPath::Path(path) => {
-                // Safe because this will only modify the contents of `buf`.
-                unsafe {
-                    libc::lgetxattr(
-                        path.as_ptr(),
-                        name.as_ptr(),
-                        buf.as_mut_ptr() as *mut libc::c_void,
-                        size as libc::size_t,
-                    )
-                }
+        } else {
+            // For regular files, use fgetxattr
+            unsafe {
+                libc::fgetxattr(
+                    file.as_raw_fd(),
+                    name.as_ptr(),
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    size as libc::size_t,
+                )
             }
         };
 
@@ -2842,26 +2820,25 @@ impl OverlayFs {
         // The f{set,get,remove,list}xattr functions don't work on an fd opened with `O_PATH` so we
         // need to get a new fd. This doesn't work for symlinks, so we use the l* family of
         // functions in that case.
-        let res = match self.open_inode_or_path(inode, libc::O_RDONLY | libc::O_NONBLOCK)? {
-            FileOrPath::File(file) => {
-                // Safe because this will only modify the contents of `buf`.
-                unsafe {
-                    libc::flistxattr(
-                        file.as_raw_fd(),
-                        buf.as_mut_ptr() as *mut libc::c_char,
-                        size as libc::size_t,
-                    )
-                }
+        let (file, is_symlink) = self.open_inode(inode, libc::O_RDONLY | libc::O_NONBLOCK)?;
+        let res = if is_symlink {
+            // For symlinks, use llistxattr on the proc path
+            let proc_path = Self::fd_to_path(file.as_raw_fd())?;
+            unsafe {
+                libc::llistxattr(
+                    proc_path.as_ptr(),
+                    buf.as_mut_ptr() as *mut libc::c_char,
+                    size as libc::size_t,
+                )
             }
-            FileOrPath::Path(path) => {
-                // Safe because this will only modify the contents of `buf`.
-                unsafe {
-                    libc::llistxattr(
-                        path.as_ptr(),
-                        buf.as_mut_ptr() as *mut libc::c_char,
-                        size as libc::size_t,
-                    )
-                }
+        } else {
+            // For regular files, use flistxattr
+            unsafe {
+                libc::flistxattr(
+                    file.as_raw_fd(),
+                    buf.as_mut_ptr() as *mut libc::c_char,
+                    size as libc::size_t,
+                )
             }
         };
 
@@ -2893,17 +2870,15 @@ impl OverlayFs {
         // The f{set,get,remove,list}xattr functions don't work on an fd opened with `O_PATH` so we
         // need to get a new fd. This doesn't work for symlinks, so we use the l* family of
         // functions in that case.
-        let res =
-            match self.open_inode_or_path(inode_data.inode, libc::O_RDONLY | libc::O_NONBLOCK)? {
-                FileOrPath::File(file) => {
-                    // Safe because this doesn't modify any memory and we check the return value.
-                    unsafe { libc::fremovexattr(file.as_raw_fd(), name.as_ptr()) }
-                }
-                FileOrPath::Path(path) => {
-                    // Safe because this doesn't modify any memory and we check the return value.
-                    unsafe { libc::lremovexattr(path.as_ptr(), name.as_ptr()) }
-                }
-            };
+        let (file, is_symlink) = self.open_inode(inode_data.inode, libc::O_RDONLY | libc::O_NONBLOCK)?;
+        let res = if is_symlink {
+            // For symlinks, use lremovexattr on the proc path
+            let proc_path = Self::fd_to_path(file.as_raw_fd())?;
+            unsafe { libc::lremovexattr(proc_path.as_ptr(), name.as_ptr()) }
+        } else {
+            // For regular files, use fremovexattr
+            unsafe { libc::fremovexattr(file.as_raw_fd(), name.as_ptr()) }
+        };
 
         if res < 0 {
             return Err(io::Error::last_os_error());
@@ -3054,7 +3029,7 @@ impl OverlayFs {
         let inode_data = self.get_inode_data(inode)?;
         let inode_data = self.ensure_top_layer(inode_data)?;
 
-        let file = self.open_inode(inode_data.inode, open_flags)?;
+        let (file, _) = self.open_inode(inode_data.inode, open_flags)?;
         let fd = file.as_raw_fd();
 
         let ret = unsafe {
