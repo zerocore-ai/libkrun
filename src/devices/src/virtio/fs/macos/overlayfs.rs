@@ -2461,27 +2461,24 @@ impl OverlayFs {
             Self::set_secctx(&FileId::Fd(fd), secctx, false)?
         };
 
-        // Get the initial stat for the directory
+        // Get the initial stat for the file
         let stat = Self::unpatched_stat(&FileId::Path(c_path.clone()))?;
 
         // Set ownership and permissions
-        if let Err(e) = Self::set_override_xattr(
+        Self::set_override_xattr(
             &FileId::Fd(fd),
             &stat,
             Some((ctx.uid, ctx.gid)),
             Some((libc::S_IFREG as u32 | (mode & !(umask & 0o777))) as u16),
-        ) {
-            unsafe { libc::close(fd) };
-            return Err(e);
-        }
+        )?;
 
-        // Get the updated stat for the directory
+        // Get the updated stat for the file
         let updated_stat = Self::patched_stat(&FileId::Path(c_path))?;
 
         let mut path = parent_data.path.clone();
         path.push(self.intern_name(name)?);
 
-        // Create the inode for the newly created directory
+        // Create the inode for the newly created file
         let (inode, _) = self.create_inode(
             updated_stat.st_ino,
             updated_stat.st_dev,
@@ -2489,7 +2486,7 @@ impl OverlayFs {
             parent_data.layer_idx,
         );
 
-        // Create the entry for the newly created directory
+        // Create the entry for the newly created file
         let entry = self.create_entry(inode, updated_stat);
 
         // Safe because we just opened this fd.
