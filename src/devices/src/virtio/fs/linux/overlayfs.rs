@@ -590,56 +590,6 @@ impl OverlayFs {
         Ok((unsafe { File::from_raw_fd(fd) }, false))
     }
 
-    /// Opens a file from a path, handling symlinks properly.
-    /// Returns (File, is_symlink) where is_symlink indicates if the file is a symlink.
-    fn open_file(&self, path: &CStr, mut flags: i32) -> io::Result<(File, bool)> {
-        flags = self.adjust_flags_for_writeback(flags);
-
-        // First attempt: try to open with security flags for VM virtualization:
-        // - O_NOFOLLOW: Prevents symlink traversal attacks where malicious guests could
-        //   escape the virtualized filesystem by creating symlinks to host paths
-        // - O_CLOEXEC: Ensures file descriptors don't leak to child processes, preventing
-        //   potential privilege escalation or information disclosure
-        // If the target is a symlink, this will fail with ELOOP.
-        let fd = unsafe {
-            libc::open(
-                path.as_ptr(),
-                flags | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                0
-            )
-        };
-
-        if fd >= 0 {
-            // Success - return the opened file (not a symlink)
-            return Ok((unsafe { File::from_raw_fd(fd) }, false));
-        }
-
-        let err = io::Error::last_os_error();
-
-        // If we got ELOOP, it means we encountered a symlink
-        if err.raw_os_error() == Some(libc::ELOOP) {
-            // For symlinks, we open with additional security flags for VM virtualization:
-            // - O_PATH: Get a file descriptor to the symlink itself without following it,
-            //   allows metadata operations while maintaining security boundaries
-            // - O_NOFOLLOW: Still prevent following symlinks (defense in depth)
-            // - O_CLOEXEC: Prevent fd leaks to child processes
-            let symlink_fd = unsafe {
-                libc::open(
-                    path.as_ptr(),
-                    flags | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_PATH,
-                    0,
-                )
-            };
-
-            if symlink_fd >= 0 {
-                return Ok((unsafe { File::from_raw_fd(symlink_fd) }, true));
-            }
-        }
-
-        // Return the original error if we couldn't handle it
-        Err(err)
-    }
-
     /// Opens a file relative to a parent, handling symlinks properly.
     /// Returns (File, is_symlink) where is_symlink indicates if the file is a symlink.
     fn open_file_at(&self, parent: RawFd, name: &CStr, mut flags: i32) -> io::Result<(File, bool)> {
@@ -802,29 +752,44 @@ impl OverlayFs {
             }
         }
 
-        // Get the path for this fd and try to open it properly
+        // Get the proc path for this fd
         let proc_path = Self::fd_to_path(fd)?;
 
-        let (file, is_symlink) = self.open_file(&proc_path, libc::O_RDONLY | libc::O_NONBLOCK)?;
+        // Resolve the proc symlink to get the actual file path
+        let mut target_path = vec![0u8; libc::PATH_MAX as usize];
+        let len = unsafe {
+            libc::readlink(
+                proc_path.as_ptr(),
+                target_path.as_mut_ptr() as *mut libc::c_char,
+                target_path.len(),
+            )
+        };
+
+        if len < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        target_path.truncate(len as usize);
+        let actual_path = CString::new(target_path).map_err(|_| einval())?;
+
+        // Determine if this is a symlink
+        let is_symlink = file_type == libc::S_IFLNK;
 
         let res = if is_symlink {
-            // For symlinks, we must use lgetxattr on the path directly because:
-            // 1. The fd returned by open_file is an O_PATH fd (metadata-only)
-            // 2. fgetxattr doesn't work on O_PATH fds for symlinks
-            // 3. We need to read xattrs from the symlink itself, not its target
+            // For symlinks, use lgetxattr to get xattrs from the symlink itself
             unsafe {
                 libc::lgetxattr(
-                    proc_path.as_ptr(),
+                    actual_path.as_ptr(),
                     OVERRIDE_STAT_XATTR_KEY.as_ptr() as *const i8,
                     buf.as_mut_ptr() as *mut libc::c_void,
                     buf.len(),
                 )
             }
         } else {
-            // For regular files/directories, use fgetxattr on the file descriptor
+            // For regular files/directories, use getxattr
             unsafe {
-                libc::fgetxattr(
-                    file.as_raw_fd(),
+                libc::getxattr(
+                    actual_path.as_ptr(),
                     OVERRIDE_STAT_XATTR_KEY.as_ptr() as *const i8,
                     buf.as_mut_ptr() as *mut libc::c_void,
                     buf.len(),
@@ -898,19 +863,34 @@ impl OverlayFs {
         let value = format!("{}:{}:{:o}", uid, gid, mode & 0o7777);
         let value_bytes = value.as_bytes();
 
-        // Get the path for this fd and try to open it properly
+        // Get the proc path for this fd
         let proc_path = Self::fd_to_path(fd)?;
 
-        let (file, is_symlink) = self.open_file(&proc_path, libc::O_RDONLY | libc::O_NONBLOCK)?;
+        // Resolve the proc symlink to get the actual file path
+        let mut target_path = vec![0u8; libc::PATH_MAX as usize];
+        let len = unsafe {
+            libc::readlink(
+                proc_path.as_ptr(),
+                target_path.as_mut_ptr() as *mut libc::c_char,
+                target_path.len(),
+            )
+        };
+
+        if len < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        target_path.truncate(len as usize);
+        let actual_path = CString::new(target_path).map_err(|_| einval())?;
+
+        // Determine if this is a symlink
+        let is_symlink = file_type == libc::S_IFLNK;
 
         let res = if is_symlink {
-            // For symlinks, we must use lsetxattr on the path directly because:
-            // 1. The fd returned by open_file is an O_PATH fd (metadata-only)
-            // 2. fsetxattr doesn't work on O_PATH fds for symlinks
-            // 3. We need to set xattrs on the symlink itself, not its target
+            // For symlinks, use lsetxattr to set xattrs on the symlink itself
             unsafe {
                 libc::lsetxattr(
-                    proc_path.as_ptr(),
+                    actual_path.as_ptr(),
                     OVERRIDE_STAT_XATTR_KEY.as_ptr() as *const i8,
                     value_bytes.as_ptr() as *const libc::c_void,
                     value_bytes.len(),
@@ -918,10 +898,10 @@ impl OverlayFs {
                 )
             }
         } else {
-            // For regular files/directories, use fsetxattr on the file descriptor
+            // For regular files/directories, use setxattr
             unsafe {
-                libc::fsetxattr(
-                    file.as_raw_fd(),
+                libc::setxattr(
+                    actual_path.as_ptr(),
                     OVERRIDE_STAT_XATTR_KEY.as_ptr() as *const i8,
                     value_bytes.as_ptr() as *const libc::c_void,
                     value_bytes.len(),
