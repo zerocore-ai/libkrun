@@ -6,6 +6,7 @@ use std::{ffi::CStr, io, path::PathBuf, sync::{atomic::AtomicI32, Arc}, time::Du
 use crossbeam_channel::Sender;
 
 use crate::virtio::bindings;
+#[cfg(target_os = "macos")]
 use utils::worker_message::WorkerMessage;
 
 use super::{

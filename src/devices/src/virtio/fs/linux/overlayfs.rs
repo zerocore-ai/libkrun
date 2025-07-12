@@ -138,10 +138,6 @@ pub(crate) struct HandleData {
     exported: AtomicBool,
 }
 
-pub(crate) struct ScopedGid;
-
-pub(crate) struct ScopedUid;
-
 /// The caching policy that the file system should report to the FUSE client. By default the FUSE
 /// protocol uses close-to-open consistency. This means that any cached contents of the file are
 /// invalidated the next time that file is opened.
@@ -297,14 +293,6 @@ pub struct OverlayFs {
     /// mount points for other filesystems.
     announce_submounts: AtomicBool,
 
-    /// The UID of the process if it doesn't have CAP_SETUID capability, None otherwise.
-    /// Used to restrict UID changes to privileged processes.
-    my_uid: Option<libc::uid_t>,
-
-    /// The GID of the process if it doesn't have CAP_SETGID capability, None otherwise.
-    /// Used to restrict GID changes to privileged processes.
-    my_gid: Option<libc::gid_t>,
-
     /// Whether the process has CAP_FOWNER capability.
     cap_fowner: bool,
 
@@ -319,7 +307,6 @@ pub struct OverlayFs {
     layer_roots: Arc<RwLock<Vec<Inode>>>,
 }
 
-
 /// Represents either a file descriptor or a path
 enum FileId {
     /// A file descriptor
@@ -332,28 +319,6 @@ enum FileId {
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
-
-impl ScopedGid {
-    fn new(gid: libc::gid_t) -> io::Result<Self> {
-        let res = unsafe { libc::syscall(libc::SYS_setresgid, -1, gid, -1) };
-        if res != 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        Ok(Self {})
-    }
-}
-
-impl ScopedUid {
-    fn new(uid: libc::uid_t) -> io::Result<Self> {
-        let res = unsafe { libc::syscall(libc::SYS_setresuid, -1, uid, -1) };
-        if res != 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        Ok(Self {})
-    }
-}
 
 impl InodeAltKey {
     fn new(ino: libc::ino64_t, dev: libc::dev_t, mnt_id: u64) -> Self {
@@ -408,24 +373,6 @@ impl OverlayFs {
             fd
         };
 
-        // Get the UID of the process
-        let my_uid = if has_cap(None, CapSet::Effective, Capability::CAP_SETUID).unwrap_or_default()
-        {
-            None
-        } else {
-            // SAFETY: This syscall is always safe to call and  always succeeds.
-            Some(unsafe { libc::getuid() })
-        };
-
-        // Get the GID of the process
-        let my_gid = if has_cap(None, CapSet::Effective, Capability::CAP_SETGID).unwrap_or_default()
-        {
-            None
-        } else {
-            // SAFETY: This syscall is always safe to call and  always succeeds.
-            Some(unsafe { libc::getgid() })
-        };
-
         let cap_fowner =
             has_cap(None, CapSet::Effective, Capability::CAP_FOWNER).unwrap_or_default();
 
@@ -442,8 +389,6 @@ impl OverlayFs {
             proc_self_fd,
             writeback: AtomicBool::new(false),
             announce_submounts: AtomicBool::new(false),
-            my_uid,
-            my_gid,
             cap_fowner,
             config,
             filenames: Arc::new(RwLock::new(SymbolTable::new())),
@@ -542,7 +487,7 @@ impl OverlayFs {
     /// Adjusts flags for writeback caching requirements in VM virtualization contexts.
     fn adjust_flags_for_writeback(&self, mut flags: i32) -> i32 {
         let writeback = self.writeback.load(Ordering::Relaxed);
-        
+
         // For VM virtualization with writeback caching: convert O_WRONLY to O_RDWR
         // because the kernel may send read requests even if the userspace program opened
         // the file write-only. This prevents EBADF errors in the VM guest.
@@ -708,36 +653,31 @@ impl OverlayFs {
         let (mut stat, mnt_id) = Self::unpatched_statx(fd, name)?;
 
         // Get owner and permissions from xattr
-        if let Ok(Some((uid, gid, mode))) = self.get_override_xattr(fd, &stat) {
+        if let Ok(Some((uid, gid, mode, rdev))) = self.get_override_xattr(fd, &stat) {
             // Update the stat with the xattr values if available
             stat.st_uid = uid;
             stat.st_gid = gid;
-
-            // Make sure we only modify the permission bits (lower 12 bits)
-            stat.st_mode = (stat.st_mode & !0o7777) | mode;
+            stat.st_mode = mode;
+            
+            // For device nodes, also update rdev
+            if let Some(device) = rdev {
+                let file_type = mode & libc::S_IFMT;
+                if file_type == libc::S_IFBLK || file_type == libc::S_IFCHR {
+                    stat.st_rdev = device;
+                }
+            }
         }
 
         Ok((stat, mnt_id))
     }
 
     /// Retrieves override attributes from extended attributes.
+    /// Returns (uid, gid, mode, rdev) where rdev is optional (only for device nodes)
     fn get_override_xattr(
         &self,
         fd: RawFd,
         st: &libc::stat64,
-    ) -> io::Result<Option<(u32, u32, u32)>> {
-        // Check if this file type supports xattr
-        let file_type = st.st_mode & libc::S_IFMT;
-        let supports_xattr = match file_type {
-            libc::S_IFREG | libc::S_IFDIR | libc::S_IFLNK => true,
-            libc::S_IFIFO | libc::S_IFSOCK | libc::S_IFBLK | libc::S_IFCHR => false,
-            _ => true, // Default to trying for unknown types
-        };
-
-        if !supports_xattr {
-            return Ok(None);
-        }
-
+    ) -> io::Result<Option<(u32, u32, u32, Option<u64>)>> {
         // Try to get the owner and permissions from xattr
         let mut buf: Vec<u8> = vec![0; 32];
 
@@ -772,8 +712,8 @@ impl OverlayFs {
         target_path.truncate(len as usize);
         let actual_path = CString::new(target_path).map_err(|_| einval())?;
 
-        // Determine if this is a symlink
-        let is_symlink = file_type == libc::S_IFLNK;
+        // Determine if this is a symlink from the stat structure
+        let is_symlink = (st.st_mode & libc::S_IFMT) == libc::S_IFLNK;
 
         let res = if is_symlink {
             // For symlinks, use lgetxattr to get xattrs from the symlink itself
@@ -816,9 +756,9 @@ impl OverlayFs {
         let len = res as usize;
         buf.truncate(len);
 
-        // Parse the xattr value - expected format is "uid:gid:mode"
+        // Parse the xattr value - expected format is "uid:gid:mode" or "uid:gid:mode:rdev"
         let parts: Vec<&[u8]> = buf.split(|&b| b == b':').collect();
-        if parts.len() != 3 {
+        if parts.len() < 3 {
             return Ok(None);
         }
 
@@ -826,8 +766,25 @@ impl OverlayFs {
         let uid = item_to_value(parts[0], 10).unwrap_or(st.st_uid);
         let gid = item_to_value(parts[1], 10).unwrap_or(st.st_gid);
         let mode = item_to_value(parts[2], 8).unwrap_or(st.st_mode);
+        
+        // Parse rdev if present (for device nodes)
+        let rdev = if parts.len() >= 4 {
+            // Helper function to convert byte slice to u64 value
+            fn item_to_u64_value(item: &[u8], radix: u32) -> Option<u64> {
+                match std::str::from_utf8(item) {
+                    Ok(val) => match u64::from_str_radix(val, radix) {
+                        Ok(i) => Some(i),
+                        Err(_) => None,
+                    },
+                    Err(_) => None,
+                }
+            }
+            item_to_u64_value(parts[3], 10)
+        } else {
+            None
+        };
 
-        Ok(Some((uid, gid, mode)))
+        Ok(Some((uid, gid, mode, rdev)))
     }
 
     /// Sets the override attributes in extended attributes.
@@ -837,19 +794,8 @@ impl OverlayFs {
         st: &libc::stat64,
         owner: Option<(u32, u32)>,
         mode: Option<u32>,
+        rdev: Option<u64>,
     ) -> io::Result<()> {
-        // Check if this file type supports xattr
-        let file_type = st.st_mode & libc::S_IFMT;
-        let supports_xattr = match file_type {
-            libc::S_IFREG | libc::S_IFDIR | libc::S_IFLNK => true,
-            libc::S_IFIFO | libc::S_IFSOCK | libc::S_IFBLK | libc::S_IFCHR => false,
-            _ => true, // Default to trying for unknown types
-        };
-
-        if !supports_xattr {
-            return Ok(());
-        }
-
         // Get the current values to use as defaults
         let (uid, gid) = if let Some((uid, gid)) = owner {
             (uid, gid)
@@ -859,8 +805,19 @@ impl OverlayFs {
 
         let mode = mode.unwrap_or(st.st_mode);
 
-        // Format the xattr value
-        let value = format!("{}:{}:{:o}", uid, gid, mode & 0o7777);
+        // Format the xattr value - include full mode with file type bits for special files
+        // that we store as regular files (FIFOs, sockets, device nodes)
+        // For device nodes, also include rdev
+        let value = if let Some(device) = rdev {
+            let file_type = mode & libc::S_IFMT;
+            if file_type == libc::S_IFBLK || file_type == libc::S_IFCHR {
+                format!("{}:{}:0{:o}:{}", uid, gid, mode, device)
+            } else {
+                format!("{}:{}:0{:o}", uid, gid, mode)
+            }
+        } else {
+            format!("{}:{}:0{:o}", uid, gid, mode)
+        };
         let value_bytes = value.as_bytes();
 
         // Get the proc path for this fd
@@ -883,8 +840,8 @@ impl OverlayFs {
         target_path.truncate(len as usize);
         let actual_path = CString::new(target_path).map_err(|_| einval())?;
 
-        // Determine if this is a symlink
-        let is_symlink = file_type == libc::S_IFLNK;
+        // Determine if this is a symlink from the stat structure
+        let is_symlink = (st.st_mode & libc::S_IFMT) == libc::S_IFLNK;
 
         let res = if is_symlink {
             // For symlinks, use lsetxattr to set xattrs on the symlink itself
@@ -933,7 +890,6 @@ impl OverlayFs {
         let path = format!("/proc/self/fd/{}", fd);
         CString::new(path).map_err(|_| einval())
     }
-
 
     pub fn get_config(&self) -> &Config {
         &self.config
@@ -1533,7 +1489,9 @@ impl OverlayFs {
             }
 
             // Update parent for next iteration
-            let child = self.open_file_at(parent.as_raw_fd(), &segment_name, libc::O_PATH)?.0;
+            let child = self
+                .open_file_at(parent.as_raw_fd(), &segment_name, libc::O_PATH)?
+                .0;
             let (new_stat, new_mnt_id) = Self::unpatched_statx(child.as_raw_fd(), None)?;
             parent = child.try_clone()?;
 
@@ -1663,62 +1621,6 @@ impl OverlayFs {
         }
 
         Ok(())
-    }
-
-    /// Temporarily changes the effective UID and GID of the current thread to the requested values using RAII guards.
-    ///
-    /// If the requested UID or GID is 0 (root) or already matches the current effective UID/GID (as stored in my_uid and my_gid),
-    /// no credential switching is performed and None is returned for that component.
-    ///
-    /// When credential switching is performed, an RAII guard (ScopedUid or ScopedGid) is returned that will restore the
-    /// effective UID or GID to root (0) when dropped. If the process lacks the required capability (CAP_SETUID or CAP_SETGID)
-    /// and the requested UID/GID does not match the current credentials, the function returns an EPERM error.
-    ///
-    /// # Arguments
-    /// * `uid` - The requested user ID to switch to.
-    /// * `gid` - The requested group ID to switch to.
-    ///
-    /// # Returns
-    /// A tuple `(Option<ScopedUid>, Option<ScopedGid>)` where:
-    /// - `Option<ScopedUid>` is Some if the effective UID was changed, or None if no change was needed.
-    /// - `Option<ScopedGid>` is Some if the effective GID was changed, or None if no change was needed.
-    ///
-    /// # Errors
-    /// Returns EPERM if the process lacks the required capability to change to a non-matching UID or GID.
-    fn set_scoped_credentials(
-        &self,
-        uid: libc::uid_t,
-        gid: libc::gid_t,
-    ) -> io::Result<(Option<ScopedUid>, Option<ScopedGid>)> {
-        // Handle GID changes first since changing UID to non-root may prevent GID changes
-        let scoped_gid = if gid == 0 || self.my_gid == Some(gid) {
-            // If the requested GID is 0 (root) or matches our current GID,
-            // no credential switching is needed.
-            None
-        } else if self.my_gid.is_some() {
-            // Process doesn't have CAP_SETGID capability and the requested GID
-            // does not match our current GID, so we cannot switch.
-            return Err(io::Error::from_raw_os_error(libc::EPERM));
-        } else {
-            // Process has CAP_SETGID capability, attempt to switch to the requested GID
-            Some(ScopedGid::new(gid)?)
-        };
-
-        // Handle UID changes after GID
-        let scoped_uid = if uid == 0 || self.my_uid == Some(uid) {
-            // If the requested UID is 0 (root) or matches our current UID,
-            // no credential switching is needed.
-            None
-        } else if self.my_uid.is_some() {
-            // Process doesn't have CAP_SETUID capability and the requested UID
-            // does not match our current UID, so we cannot switch.
-            return Err(io::Error::from_raw_os_error(libc::EPERM));
-        } else {
-            // Process has CAP_SETUID capability, attempt to switch to the requested UID
-            Some(ScopedUid::new(uid)?)
-        };
-
-        Ok((scoped_uid, scoped_gid))
     }
 
     /// Decrements the reference count for an inode and removes it if the count reaches zero
@@ -1855,9 +1757,6 @@ impl OverlayFs {
             unimplemented!("SECURITY_CTX is not supported and should not be used by the guest");
         }
 
-        // Set the credentials for the operation
-        let (_uid, _gid) = self.set_scoped_credentials(ctx.uid, ctx.gid)?;
-
         // Check if an entry with the same name already exists in the parent directory
         match self.do_lookup(parent, name) {
             Ok(_) => {
@@ -1887,12 +1786,13 @@ impl OverlayFs {
             // Get initial stat.
             let (stat, _) = Self::unpatched_statx(file.as_raw_fd(), None)?;
 
-            // Set ownership and permissions
+            // Set ownership and permissions, including the directory file type bit
             self.set_override_xattr(
                 file.as_raw_fd(),
                 &stat,
                 Some((ctx.uid, ctx.gid)),
-                Some(mode & !umask),
+                Some(libc::S_IFDIR | (mode & !umask)),
+                None,
             )?;
 
             // Get updated stat
@@ -2140,9 +2040,6 @@ impl OverlayFs {
             unimplemented!("SECURITY_CTX is not supported and should not be used by the guest");
         }
 
-        // Set the credentials for the operation
-        let (_uid, _gid) = self.set_scoped_credentials(ctx.uid, ctx.gid)?;
-
         // Check if an entry with the same name already exists in the parent directory
         match self.do_lookup(parent, name) {
             Ok(_) => {
@@ -2189,6 +2086,7 @@ impl OverlayFs {
             &stat,
             Some((ctx.uid, ctx.gid)),
             Some(libc::S_IFREG | (mode & !(umask & 0o777))),
+            None,
         )?;
 
         // Get updated stat
@@ -2295,7 +2193,14 @@ impl OverlayFs {
             };
 
             // Update extended attributes with new ownership/mode
-            self.set_override_xattr(inode_data.file.as_raw_fd(), &updated_stat, owner, mode)?;
+            // For device nodes, preserve the existing rdev
+            let rdev = if (updated_stat.st_mode & libc::S_IFMT) == libc::S_IFBLK ||
+                        (updated_stat.st_mode & libc::S_IFMT) == libc::S_IFCHR {
+                Some(updated_stat.st_rdev)
+            } else {
+                None
+            };
+            self.set_override_xattr(inode_data.file.as_raw_fd(), &updated_stat, owner, mode, rdev)?;
 
             // Update the stat structure with new values
             if let Some((uid, gid)) = owner {
@@ -2438,9 +2343,6 @@ impl OverlayFs {
 
         Self::validate_name(name)?;
 
-        // Set the credentials for the operation
-        let (_uid, _gid) = self.set_scoped_credentials(ctx.uid, ctx.gid)?;
-
         // Check if an entry with the same name already exists in the parent directory
         match self.do_lookup(parent, name) {
             Ok(_) => {
@@ -2462,37 +2364,54 @@ impl OverlayFs {
         // Get the parent file descriptor
         let parent_fd = parent_data.file.as_raw_fd();
 
-        // Create the node using mknodat
-        let res = unsafe {
-            libc::mknodat(
+        // NOTE: Special files (FIFOs, sockets, device nodes) are created as regular files.
+        // This allows us to set xattr on them since Linux doesn't support xattr on special files.
+        // The actual file type is stored in the override xattr and the FUSE layer presents
+        // them as special files to the guest.
+        let fd = unsafe {
+            libc::openat(
                 parent_fd,
                 name.as_ptr(),
-                mode & !(umask & 0o777),
-                rdev as libc::dev_t,
+                libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                0o600,
             )
         };
 
-        if res < 0 {
+        if fd < 0 {
             return Err(io::Error::last_os_error());
         }
-
-        // Open the newly created node using O_PATH to avoid hanging on special files
-        let file = self.open_file_at(parent_fd, name, libc::O_PATH)?.0;
-        let fd = file.as_raw_fd();
 
         // Get initial stat
         let (stat, _) = Self::unpatched_statx(fd, None)?;
 
-        // Set ownership and permissions via xattr
+        // Set ownership and permissions via xattr, including the full mode with file type bits
+        // This is crucial for special files as we store them as regular files but need to
+        // preserve their actual file type (FIFO, socket, block/char device)
+        // For device nodes, include rdev
+        let device_rdev = if (mode & libc::S_IFMT) == libc::S_IFBLK ||
+                             (mode & libc::S_IFMT) == libc::S_IFCHR {
+            Some(rdev as u64)
+        } else {
+            None
+        };
+        
         if let Err(e) = self.set_override_xattr(
             fd,
             &stat,
             Some((ctx.uid, ctx.gid)),
             Some(mode & !(umask & 0o777)),
+            device_rdev,
         ) {
-            // If xattr fails, log but continue - the function handles unsupported file types
-            debug!("Failed to set override xattr: {}", e);
+            unsafe { libc::close(fd) };
+            return Err(e);
         }
+
+        // Close the write fd
+        unsafe { libc::close(fd) };
+
+        // Open the file using O_PATH for metadata operations
+        let file = self.open_file_at(parent_fd, name, libc::O_PATH)?.0;
+        let fd = file.as_raw_fd();
 
         // Get the updated stat (may be the same if xattr couldn't be set)
         let (updated_stat, mnt_id) = self.patched_statx(fd, None)?;
@@ -2588,9 +2507,6 @@ impl OverlayFs {
             unimplemented!("SECURITY_CTX is not supported and should not be used by the guest");
         }
 
-        // Set the credentials for the operation
-        let (_uid, _gid) = self.set_scoped_credentials(ctx.uid, ctx.gid)?;
-
         // Check if an entry with the same name already exists in the parent directory
         match self.do_lookup(parent, name) {
             Ok(_) => {
@@ -2627,6 +2543,7 @@ impl OverlayFs {
                 &stat,
                 Some((ctx.uid, ctx.gid)),
                 Some(libc::S_IFLNK | 0777),
+                None,
             )?;
 
             // Get updated stat
@@ -2696,7 +2613,8 @@ impl OverlayFs {
         // The f{set,get,remove,list}xattr functions don't work on an fd opened with `O_PATH` so we
         // need to get a new fd. This doesn't work for symlinks, so we use the l* family of
         // functions in that case.
-        let (file, is_symlink) = self.open_inode(inode_data.inode, libc::O_RDONLY | libc::O_NONBLOCK)?;
+        let (file, is_symlink) =
+            self.open_inode(inode_data.inode, libc::O_RDONLY | libc::O_NONBLOCK)?;
         let res = if is_symlink {
             // For symlinks, use lsetxattr on the proc path
             let proc_path = Self::fd_to_path(file.as_raw_fd())?;
@@ -2850,7 +2768,8 @@ impl OverlayFs {
         // The f{set,get,remove,list}xattr functions don't work on an fd opened with `O_PATH` so we
         // need to get a new fd. This doesn't work for symlinks, so we use the l* family of
         // functions in that case.
-        let (file, is_symlink) = self.open_inode(inode_data.inode, libc::O_RDONLY | libc::O_NONBLOCK)?;
+        let (file, is_symlink) =
+            self.open_inode(inode_data.inode, libc::O_RDONLY | libc::O_NONBLOCK)?;
         let res = if is_symlink {
             // For symlinks, use lremovexattr on the proc path
             let proc_path = Self::fd_to_path(file.as_raw_fd())?;
@@ -3367,7 +3286,7 @@ impl FileSystem for OverlayFs {
 
     fn write<R: io::Read + ZeroCopyReader>(
         &self,
-        ctx: Context,
+        _ctx: Context,
         inode: Inode,
         handle: Handle,
         mut r: R,
@@ -3375,15 +3294,9 @@ impl FileSystem for OverlayFs {
         offset: u64,
         _lock_owner: Option<u64>,
         _delayed_write: bool,
-        kill_priv: bool,
+        _kill_priv: bool,
         _flags: u32,
     ) -> io::Result<usize> {
-        if kill_priv {
-            // We need to change credentials during a write so that the kernel will remove setuid
-            // or setgid bits from the file if it was written to by someone other than the owner.
-            let (_uid, _gid) = self.set_scoped_credentials(ctx.uid, ctx.gid)?;
-        }
-
         let data = self.get_inode_handle_data(inode, handle)?;
         let f = data.file.read().unwrap();
         r.read_to(&f, size as usize, offset)
@@ -3677,30 +3590,6 @@ impl FileSystem for OverlayFs {
         exit_code: &Arc<AtomicI32>,
     ) -> io::Result<Vec<u8>> {
         self.do_ioctl(inode, handle, cmd, arg, out_size, exit_code)
-    }
-}
-
-impl Drop for ScopedGid {
-    fn drop(&mut self) {
-        let res = unsafe { libc::syscall(libc::SYS_setresgid, -1, 0, -1) };
-        if res != 0 {
-            log::error!(
-                "failed to restore gid back to root: {}",
-                io::Error::last_os_error()
-            );
-        }
-    }
-}
-
-impl Drop for ScopedUid {
-    fn drop(&mut self) {
-        let res = unsafe { libc::syscall(libc::SYS_setresuid, -1, 0, -1) };
-        if res != 0 {
-            log::error!(
-                "failed to restore uid back to root: {}",
-                io::Error::last_os_error()
-            );
-        }
     }
 }
 

@@ -1,4 +1,4 @@
-use std::{ffi::CString, fs, io, os::unix::fs::FileTypeExt};
+use std::{ffi::CString, fs, io};
 
 use crate::virtio::{
     fs::filesystem::{Context, Extensions, FileSystem},
@@ -54,7 +54,7 @@ fn test_mkdir_basic() -> io::Result<()> {
     assert_eq!(parts.len(), 3);
     assert_eq!(parts[0], "1000"); // Context default uid
     assert_eq!(parts[1], "1000"); // Context default gid
-    assert_eq!(parts[2], "755");  // mode
+    assert_eq!(parts[2], "040755");  // full mode in octal (S_IFDIR | 0755)
 
     Ok(())
 }
@@ -91,7 +91,7 @@ fn test_mkdir_with_context() -> io::Result<()> {
     let parts: Vec<&str> = xattr_str.split(':').collect();
     assert_eq!(parts[0], "2500"); // Custom uid
     assert_eq!(parts[1], "2500"); // Custom gid
-    assert_eq!(parts[2], "700");  // mode
+    assert_eq!(parts[2], "040700");  // full mode in octal (S_IFDIR | 0700)
 
     // Verify getattr returns the overridden values
     let (attr, _) = fs.getattr(ctx, entry.inode, None)?;
@@ -148,7 +148,7 @@ fn test_create_file_basic() -> io::Result<()> {
     let parts: Vec<&str> = xattr_str.split(':').collect();
     assert_eq!(parts[0], "1000"); // Context default uid
     assert_eq!(parts[1], "1000"); // Context default gid
-    assert_eq!(parts[2], "644");  // mode after umask
+    assert_eq!(parts[2], "0100644");  // full mode in octal (S_IFREG | 0644)
 
     // Release the handle
     if let Some(h) = handle {
@@ -195,7 +195,7 @@ fn test_create_file_with_umask() -> io::Result<()> {
     
     let xattr_str = xattr_value.unwrap();
     let parts: Vec<&str> = xattr_str.split(':').collect();
-    assert_eq!(parts[2], "750"); // mode after umask
+    assert_eq!(parts[2], "0100750"); // full mode in octal (S_IFREG | 0750)
 
     // Release the handle
     if let Some(h) = handle {
@@ -237,14 +237,27 @@ fn test_mknod_basic() -> io::Result<()> {
     assert_eq!(entry.attr.st_mode & libc::S_IFMT, libc::S_IFIFO);
     assert_eq!(entry.attr.st_mode & 0o777, 0o660);
 
-    // Verify the FIFO exists on disk
+    // Verify the file exists on disk
     let fifo_path = temp_dir.path().join("test_fifo");
     assert!(fifo_path.exists());
     let metadata = fs::metadata(&fifo_path)?;
-    assert!(metadata.file_type().is_fifo());
-
-    // Note: Linux doesn't support xattrs on special files like FIFOs, sockets, or device nodes
-    // so we don't check for override xattr here. This is expected behavior.
+    
+    // Check that the file on disk is actually a regular file (not a special file)
+    // since we now create special files as regular files to support xattr
+    assert!(metadata.file_type().is_file(), "Special files should be stored as regular files");
+    
+    // Verify xattr was set correctly with the full mode (including file type)
+    let xattr_value = helper::get_xattr(&fifo_path, "user.containers.override_stat")?;
+    assert!(xattr_value.is_some(), "Override xattr should be set on special files");
+    
+    // Parse the xattr to verify it contains the correct file type
+    if let Some(xattr) = xattr_value {
+        let parts: Vec<&str> = xattr.split(':').collect();
+        assert_eq!(parts.len(), 3, "xattr should have format uid:gid:mode");
+        let stored_mode = u32::from_str_radix(parts[2], 8).expect("mode should be valid octal");
+        assert_eq!(stored_mode & libc::S_IFMT, libc::S_IFIFO, 
+            "xattr should store the correct file type");
+    }
 
     Ok(())
 }

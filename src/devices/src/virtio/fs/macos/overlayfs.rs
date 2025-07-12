@@ -1007,12 +1007,19 @@ impl OverlayFs {
         let mut stat = Self::unpatched_stat(file)?;
 
         // Get owner and permissions from xattr
-        if let Ok(Some((uid, gid, mode))) = Self::get_override_xattr(file, &stat) {
+        if let Ok(Some((uid, gid, mode, rdev))) = Self::get_override_xattr(file, &stat) {
             // Update the stat with the xattr values if available
             stat.st_uid = uid;
             stat.st_gid = gid;
-            // Make sure we only modify the permission bits (lower 12 bits)
-            stat.st_mode = (stat.st_mode & !0o7777u16) | mode;
+            stat.st_mode = mode as u16;
+            
+            // For device nodes, also update rdev
+            if let Some(device) = rdev {
+                let file_type = mode & libc::S_IFMT;
+                if file_type == libc::S_IFBLK || file_type == libc::S_IFCHR {
+                    stat.st_rdev = device as i32;
+                }
+            }
         }
 
         Ok(stat)
@@ -1021,7 +1028,7 @@ impl OverlayFs {
     fn get_override_xattr(
         file: &FileId,
         st: &bindings::stat64,
-    ) -> io::Result<Option<(u32, u32, u16)>> {
+    ) -> io::Result<Option<(u32, u32, u16, Option<u32>)>> {
         // Try to get the owner and permissions from xattr
         let mut buf: Vec<u8> = vec![0; 32];
 
@@ -1078,17 +1085,24 @@ impl OverlayFs {
         let len = res as usize;
         buf.truncate(len);
 
-        // Parse the xattr value
+        // Parse the xattr value - expected format is "uid:gid:mode" or "uid:gid:mode:rdev"
         let parts: Vec<&[u8]> = buf.split(|&b| b == b':').collect();
-        if parts.len() != 3 {
+        if parts.len() < 3 {
             return Ok(None);
         }
 
         let uid = item_to_value(parts[0], 10).unwrap_or(st.st_uid);
         let gid = item_to_value(parts[1], 10).unwrap_or(st.st_gid);
         let mode = item_to_value(parts[2], 8).unwrap_or(st.st_mode as u32) as u16;
+        
+        // Parse rdev if present (for device nodes)
+        let rdev = if parts.len() >= 4 {
+            item_to_value(parts[3], 10)
+        } else {
+            None
+        };
 
-        Ok(Some((uid, gid, mode)))
+        Ok(Some((uid, gid, mode, rdev)))
     }
 
     fn set_override_xattr(
@@ -1096,6 +1110,7 @@ impl OverlayFs {
         st: &bindings::stat64,
         owner: Option<(u32, u32)>,
         mode: Option<u16>,
+        rdev: Option<u32>,
     ) -> io::Result<()> {
         // Get the current values to use as defaults
         let (uid, gid) = if let Some((uid, gid)) = owner {
@@ -1106,8 +1121,19 @@ impl OverlayFs {
 
         let mode = mode.unwrap_or(st.st_mode);
 
-        // Format the xattr value
-        let value = format!("{}:{}:{:o}", uid, gid, mode & 0o7777);
+        // Format the xattr value - include full mode with file type bits for special files
+        // that we store as regular files (FIFOs, sockets, device nodes)
+        // For device nodes, also include rdev
+        let value = if let Some(device) = rdev {
+            let file_type = mode & libc::S_IFMT;
+            if file_type == libc::S_IFBLK || file_type == libc::S_IFCHR {
+                format!("{}:{}:0{:o}:{}", uid, gid, mode, device)
+            } else {
+                format!("{}:{}:0{:o}", uid, gid, mode)
+            }
+        } else {
+            format!("{}:{}:0{:o}", uid, gid, mode)
+        };
         let value_bytes = value.as_bytes();
 
         // Get options based on file type
@@ -1720,7 +1746,14 @@ impl OverlayFs {
                 None
             };
 
-            Self::set_override_xattr(&file_id, &updated_stat, owner, mode)?;
+            // For device nodes, preserve the existing rdev
+            let rdev = if (updated_stat.st_mode & libc::S_IFMT) == libc::S_IFBLK ||
+                        (updated_stat.st_mode & libc::S_IFMT) == libc::S_IFCHR {
+                Some(updated_stat.st_rdev as u32)
+            } else {
+                None
+            };
+            Self::set_override_xattr(&file_id, &updated_stat, owner, mode, rdev)?;
 
             // Update the stat structure with the new values
             if let Some((uid, gid)) = owner {
@@ -1861,6 +1894,7 @@ impl OverlayFs {
                 &stat,
                 Some((ctx.uid, ctx.gid)),
                 Some((mode & !umask) as u16),
+                None,
             )?;
 
             // Get the updated stat for the directory
@@ -1985,6 +2019,7 @@ impl OverlayFs {
                 &stat,
                 Some((ctx.uid, ctx.gid)),
                 Some(mode),
+                None,
             )?;
 
             // Get the updated stat for the directory
@@ -2069,7 +2104,8 @@ impl OverlayFs {
             };
 
             let stat = Self::unpatched_stat(&FileId::Fd(fd))?;
-            Self::set_override_xattr(&FileId::Fd(fd), &stat, None, Some(libc::S_IFCHR | 0o600))?;
+            // Whiteout is a character device with rdev 0,0
+            Self::set_override_xattr(&FileId::Fd(fd), &stat, None, Some(libc::S_IFCHR | 0o600), Some(0))?;
 
             if fd < 0 {
                 return Err(io::Error::last_os_error());
@@ -2470,6 +2506,7 @@ impl OverlayFs {
             &stat,
             Some((ctx.uid, ctx.gid)),
             Some((libc::S_IFREG as u32 | (mode & !(umask & 0o777))) as u16),
+            None,
         )?;
 
         // Get the updated stat for the file
@@ -2516,6 +2553,7 @@ impl OverlayFs {
         parent: Inode,
         name: &CStr,
         mode: u32,
+        rdev: u32,
         umask: u32,
         extensions: Extensions,
     ) -> io::Result<Entry> {
@@ -2565,11 +2603,20 @@ impl OverlayFs {
         let stat = Self::unpatched_stat(&FileId::Path(c_path.clone()))?;
 
         // Set ownership and permissions
+        // For device nodes, include rdev
+        let device_rdev = if (mode & libc::S_IFMT) == libc::S_IFBLK ||
+                             (mode & libc::S_IFMT) == libc::S_IFCHR {
+            Some(rdev)
+        } else {
+            None
+        };
+        
         if let Err(e) = Self::set_override_xattr(
             &FileId::Fd(fd),
             &stat,
             Some((ctx.uid, ctx.gid)),
             Some((mode & !umask) as u16),
+            device_rdev,
         ) {
             unsafe { libc::close(fd) };
             return Err(e);
@@ -3262,12 +3309,12 @@ impl FileSystem for OverlayFs {
         parent: Inode,
         name: &CStr,
         mode: u32,
-        _rdev: u32,
+        rdev: u32,
         umask: u32,
         extensions: Extensions,
     ) -> io::Result<Entry> {
         Self::validate_name(name)?;
-        let entry = self.do_mknod(ctx, parent, name, mode, umask, extensions)?;
+        let entry = self.do_mknod(ctx, parent, name, mode, rdev, umask, extensions)?;
         self.bump_refcount(entry.inode);
         Ok(entry)
     }

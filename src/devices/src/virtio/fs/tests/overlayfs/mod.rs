@@ -46,6 +46,7 @@ mod helper {
         fs::{self, File},
         io,
         os::unix::fs::PermissionsExt,
+        path::PathBuf,
         process::Command,
     };
 
@@ -210,5 +211,35 @@ mod helper {
         println!("================================\n");
 
         Ok(())
+    }
+    
+    // Helper to get xattr value for testing
+    pub(super) fn get_xattr(path: &PathBuf, key: &str) -> io::Result<Option<String>> {
+        use std::ffi::CString;
+
+        let path_cstr = CString::new(path.to_string_lossy().as_bytes())?;
+        let key_cstr = CString::new(key)?;
+
+        let mut buf = vec![0u8; 256];
+
+        let res = unsafe {
+            libc::getxattr(
+                path_cstr.as_ptr(),
+                key_cstr.as_ptr(),
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+            )
+        };
+
+        if res < 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ENODATA) {
+                return Ok(None);
+            }
+            return Err(err);
+        }
+
+        buf.truncate(res as usize);
+        Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
     }
 }

@@ -19,7 +19,7 @@ mod helper {
         process::Command,
     };
 
-    use crate::virtio::fs::linux::passthrough::{Config, PassthroughFs};
+    use crate::virtio::fs::passthrough::{Config, PassthroughFs};
 
     use tempfile::TempDir;
 

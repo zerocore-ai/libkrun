@@ -446,7 +446,7 @@ impl PassthroughFs {
         // Safe because we just opened this fd.
         let f = unsafe { File::from_raw_fd(fd) };
 
-        let (st, mnt_id) = unpatched_statx(&f)?;
+        let (st, mnt_id) = self.patched_statx(&f)?;
 
         let mut attr_flags: u32 = 0;
 
@@ -758,36 +758,34 @@ impl PassthroughFs {
         let (mut stat, mnt_id) = unpatched_statx(f)?;
 
         // Get owner and permissions from xattr
-        if let Ok(Some((uid, gid, mode))) = self.get_override_xattr(f, &stat) {
+        if let Ok(Some((uid, gid, mode, rdev))) = self.get_override_xattr(f, &stat) {
             // Update the stat with the xattr values if available
             stat.st_uid = uid;
             stat.st_gid = gid;
 
-            // Make sure we only modify the permission bits (lower 12 bits)
-            stat.st_mode = (stat.st_mode & !0o7777) | mode;
+            // Update the full mode including file type bits
+            // This is crucial for special files that are stored as regular files
+            stat.st_mode = mode;
+            
+            // For device nodes, also update rdev
+            if let Some(device) = rdev {
+                let file_type = mode & libc::S_IFMT;
+                if file_type == libc::S_IFBLK || file_type == libc::S_IFCHR {
+                    stat.st_rdev = device;
+                }
+            }
         }
 
         Ok((stat, mnt_id))
     }
 
     /// Retrieves override attributes from extended attributes.
+    /// Returns (uid, gid, mode, rdev) where rdev is optional (only for device nodes)
     fn get_override_xattr(
         &self,
         f: &File,
         st: &libc::stat64,
-    ) -> io::Result<Option<(u32, u32, u32)>> {
-        // Check if this file type supports xattr
-        let file_type = st.st_mode & libc::S_IFMT;
-        let supports_xattr = match file_type {
-            libc::S_IFREG | libc::S_IFDIR | libc::S_IFLNK => true,
-            libc::S_IFIFO | libc::S_IFSOCK | libc::S_IFBLK | libc::S_IFCHR => false,
-            _ => true, // Default to trying for unknown types
-        };
-
-        if !supports_xattr {
-            return Ok(None);
-        }
-
+    ) -> io::Result<Option<(u32, u32, u32, Option<u64>)>> {
         // Try to get the owner and permissions from xattr
         let mut buf: Vec<u8> = vec![0; 32];
 
@@ -823,8 +821,8 @@ impl PassthroughFs {
         target_path.truncate(len as usize);
         let actual_path = CString::new(target_path).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
 
-        // Determine if this is a symlink
-        let is_symlink = file_type == libc::S_IFLNK;
+        // Determine if this is a symlink from the stat structure
+        let is_symlink = (st.st_mode & libc::S_IFMT) == libc::S_IFLNK;
 
         let res = if is_symlink {
             // For symlinks, use lgetxattr to get xattrs from the symlink itself
@@ -867,9 +865,9 @@ impl PassthroughFs {
         let len = res as usize;
         buf.truncate(len);
 
-        // Parse the xattr value - expected format is "uid:gid:mode"
+        // Parse the xattr value - expected format is "uid:gid:mode" or "uid:gid:mode:rdev"
         let parts: Vec<&[u8]> = buf.split(|&b| b == b':').collect();
-        if parts.len() != 3 {
+        if parts.len() < 3 {
             return Ok(None);
         }
 
@@ -877,8 +875,25 @@ impl PassthroughFs {
         let uid = item_to_value(parts[0], 10).unwrap_or(st.st_uid);
         let gid = item_to_value(parts[1], 10).unwrap_or(st.st_gid);
         let mode = item_to_value(parts[2], 8).unwrap_or(st.st_mode);
+        
+        // Parse rdev if present (for device nodes)
+        let rdev = if parts.len() >= 4 {
+            // Helper function to convert byte slice to u64 value
+            fn item_to_u64_value(item: &[u8], radix: u32) -> Option<u64> {
+                match std::str::from_utf8(item) {
+                    Ok(val) => match u64::from_str_radix(val, radix) {
+                        Ok(i) => Some(i),
+                        Err(_) => None,
+                    },
+                    Err(_) => None,
+                }
+            }
+            item_to_u64_value(parts[3], 10)
+        } else {
+            None
+        };
 
-        Ok(Some((uid, gid, mode)))
+        Ok(Some((uid, gid, mode, rdev)))
     }
 
     /// Sets the override attributes in extended attributes.
@@ -888,19 +903,8 @@ impl PassthroughFs {
         st: &libc::stat64,
         owner: Option<(u32, u32)>,
         mode: Option<u32>,
+        rdev: Option<u64>,
     ) -> io::Result<()> {
-        // Check if this file type supports xattr
-        let file_type = st.st_mode & libc::S_IFMT;
-        let supports_xattr = match file_type {
-            libc::S_IFREG | libc::S_IFDIR | libc::S_IFLNK => true,
-            libc::S_IFIFO | libc::S_IFSOCK | libc::S_IFBLK | libc::S_IFCHR => false,
-            _ => true, // Default to trying for unknown types
-        };
-
-        if !supports_xattr {
-            return Ok(());
-        }
-
         // Get the current values to use as defaults
         let (uid, gid) = if let Some((uid, gid)) = owner {
             (uid, gid)
@@ -910,8 +914,19 @@ impl PassthroughFs {
 
         let mode = mode.unwrap_or(st.st_mode);
 
-        // Format the xattr value
-        let value = format!("{}:{}:{:o}", uid, gid, mode & 0o7777);
+        // Format the xattr value - include full mode with file type bits for special files
+        // that we store as regular files (FIFOs, sockets, device nodes)
+        // For device nodes, also include rdev
+        let value = if let Some(device) = rdev {
+            let file_type = mode & libc::S_IFMT;
+            if file_type == libc::S_IFBLK || file_type == libc::S_IFCHR {
+                format!("{}:{}:0{:o}:{}", uid, gid, mode, device)
+            } else {
+                format!("{}:{}:0{:o}", uid, gid, mode)
+            }
+        } else {
+            format!("{}:{}:0{:o}", uid, gid, mode)
+        };
         let value_bytes = value.as_bytes();
 
         // Get the proc path for this fd
@@ -935,8 +950,8 @@ impl PassthroughFs {
         target_path.truncate(len as usize);
         let actual_path = CString::new(target_path).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
 
-        // Determine if this is a symlink
-        let is_symlink = file_type == libc::S_IFLNK;
+        // Determine if this is a symlink from the stat structure
+        let is_symlink = (st.st_mode & libc::S_IFMT) == libc::S_IFLNK;
 
         let res = if is_symlink {
             // For symlinks, use lsetxattr to set xattrs on the symlink itself
@@ -981,6 +996,7 @@ impl PassthroughFs {
         name: &CStr,
         ctx: &Context,
         mode: Option<u32>,
+        rdev: Option<u64>,
     ) -> io::Result<()> {
         // Open the file that was just created
         let fd = unsafe {
@@ -1006,6 +1022,7 @@ impl PassthroughFs {
             &stat,
             Some((ctx.uid, ctx.gid)),
             mode,
+            rdev,
         )?;
 
         Ok(())
@@ -1225,7 +1242,7 @@ impl FileSystem for PassthroughFs {
         let res = unsafe { libc::mkdirat(data.file.as_raw_fd(), name.as_ptr(), mode & !umask) };
         if res == 0 {
             // Set override xattr before lookup
-            self.set_override_xattr_before_lookup(&data.file, name, &ctx, Some(mode & !umask))?;
+            self.set_override_xattr_before_lookup(&data.file, name, &ctx, Some(libc::S_IFDIR | (mode & !umask)), None)?;
             self.do_lookup(parent, name)
         } else {
             Err(io::Error::last_os_error())
@@ -1347,7 +1364,7 @@ impl FileSystem for PassthroughFs {
         let file = RwLock::new(unsafe { File::from_raw_fd(fd) });
 
         // Set override xattr before lookup
-        self.set_override_xattr_before_lookup(&data.file, name, &ctx, Some(mode & !(umask & 0o777)))?;
+        self.set_override_xattr_before_lookup(&data.file, name, &ctx, Some(libc::S_IFREG | (mode & !(umask & 0o777))), None)?;
 
         let entry = self.do_lookup(parent, name)?;
 
@@ -1477,7 +1494,7 @@ impl FileSystem for PassthroughFs {
 
         // Check if we need to update the override xattr
         let needs_xattr_update = valid.intersects(SetattrValid::UID | SetattrValid::GID | SetattrValid::MODE);
-        
+
         if needs_xattr_update {
             // Prepare owner values
             let owner = if valid.intersects(SetattrValid::UID | SetattrValid::GID) {
@@ -1504,7 +1521,14 @@ impl FileSystem for PassthroughFs {
             };
 
             // Update the override xattr
-            self.set_override_xattr(&inode_data.file, &current_stat, owner, mode)?;
+            // For device nodes, preserve the existing rdev
+            let rdev = if (current_stat.st_mode & libc::S_IFMT) == libc::S_IFBLK ||
+                        (current_stat.st_mode & libc::S_IFMT) == libc::S_IFCHR {
+                Some(current_stat.st_rdev)
+            } else {
+                None
+            };
+            self.set_override_xattr(&inode_data.file, &current_stat, owner, mode, rdev)?;
 
             // Update the current_stat to reflect changes
             if let Some((uid, gid)) = owner {
@@ -1546,7 +1570,7 @@ impl FileSystem for PassthroughFs {
         // may fail if we don't have permissions. That's OK - the virtualization
         // through xattr is what matters. We attempt these operations but don't
         // fail if they don't succeed (unless there's no xattr support).
-        
+
         if valid.contains(SetattrValid::MODE) && !needs_xattr_update {
             // Only try to chmod if we're not virtualizing (no xattr was set)
             // Safe because this doesn't modify any memory and we check the return value.
@@ -1728,21 +1752,34 @@ impl FileSystem for PassthroughFs {
             .cloned()
             .ok_or_else(ebadf)?;
 
-        // Safe because this doesn't modify any memory and we check the return value.
-        let res = unsafe {
-            libc::mknodat(
+        // NOTE: Special files (FIFOs, sockets, device nodes) are created as regular files.
+        // This allows us to set xattr on them since Linux doesn't support xattr on special files.
+        // The actual file type is stored in the override xattr and the FUSE layer presents
+        // them as special files to the guest.
+        let fd = unsafe {
+            libc::openat(
                 data.file.as_raw_fd(),
                 name.as_ptr(),
-                (mode & !umask) as libc::mode_t,
-                u64::from(rdev),
+                libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                0o600,
             )
         };
 
-        if res < 0 {
+        if fd < 0 {
             Err(io::Error::last_os_error())
         } else {
+            // Close the fd after creation
+            unsafe { libc::close(fd) };
+
             // Set override xattr before lookup
-            self.set_override_xattr_before_lookup(&data.file, name, &ctx, Some(mode & !umask))?;
+            // For device nodes, include rdev
+            let device_rdev = if (mode & libc::S_IFMT) == libc::S_IFBLK ||
+                                 (mode & libc::S_IFMT) == libc::S_IFCHR {
+                Some(rdev as u64)
+            } else {
+                None
+            };
+            self.set_override_xattr_before_lookup(&data.file, name, &ctx, Some(mode & !umask), device_rdev)?;
             self.do_lookup(parent, name)
         }
     }
@@ -1819,7 +1856,7 @@ impl FileSystem for PassthroughFs {
             unsafe { libc::symlinkat(linkname.as_ptr(), data.file.as_raw_fd(), name.as_ptr()) };
         if res == 0 {
             // Set override xattr before lookup
-            self.set_override_xattr_before_lookup(&data.file, name, &ctx, None)?;
+            self.set_override_xattr_before_lookup(&data.file, name, &ctx, Some(libc::S_IFLNK | 0o777), None)?;
             self.do_lookup(parent, name)
         } else {
             Err(io::Error::last_os_error())
