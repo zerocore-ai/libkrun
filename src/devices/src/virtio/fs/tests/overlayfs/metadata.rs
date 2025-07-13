@@ -969,7 +969,7 @@ fn test_special_files_metadata() -> io::Result<()> {
 
     // Test setattr - change mode
     let mut new_attr = attr;
-    new_attr.st_mode = mode_cast!(libc::S_IFIFO | 0o600) as u16;
+    new_attr.st_mode = mode_cast!(libc::S_IFIFO | 0o600);
     let valid = SetattrValid::MODE;
     let (updated_attr, _) = fs.setattr(ctx, fifo_entry.inode, new_attr, None, valid)?;
     assert_eq!(updated_attr.st_mode as u32 & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFIFO));
@@ -1027,6 +1027,9 @@ fn test_special_files_metadata() -> io::Result<()> {
     let block_name = CString::new("test.blk").unwrap();
     let major = 8u32;  // Typical SCSI disk major
     let minor = 1u32;
+    #[cfg(target_os = "linux")]
+    let rdev = libc::makedev(major, minor) as u32;
+    #[cfg(target_os = "macos")]
     let rdev = libc::makedev(major as i32, minor as i32) as u32;
     
     let block_entry = fs.mknod(
@@ -1051,7 +1054,7 @@ fn test_special_files_metadata() -> io::Result<()> {
     
     // Test setattr preserves rdev when changing other attributes
     let mut new_attr = attr;
-    new_attr.st_mode = mode_cast!(libc::S_IFBLK | 0o600) as u16;
+    new_attr.st_mode = mode_cast!(libc::S_IFBLK | 0o600);
     let valid = SetattrValid::MODE;
     let (updated_attr, _) = fs.setattr(ctx, block_entry.inode, new_attr, None, valid)?;
     assert_eq!(updated_attr.st_mode as u32 & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFBLK));
@@ -1079,6 +1082,9 @@ fn test_special_files_metadata() -> io::Result<()> {
     let char_name = CString::new("test.chr").unwrap();
     let char_major = 1u32;  // Typical mem device major
     let char_minor = 3u32;  // /dev/null
+    #[cfg(target_os = "linux")]
+    let char_rdev = libc::makedev(char_major, char_minor) as u32;
+    #[cfg(target_os = "macos")]
     let char_rdev = libc::makedev(char_major as i32, char_minor as i32) as u32;
     
     let char_entry = fs.mknod(
