@@ -42,21 +42,21 @@ fn test_getattr_basic() -> io::Result<()> {
     let file1_entry = fs.lookup(Context::default(), 1, &file1_name)?;
     let (file1_attr, _) = fs.getattr(Context::default(), file1_entry.inode, None)?;
     assert_eq!(file1_attr.st_mode & 0o777, 0o644);
-    assert_eq!(file1_attr.st_mode & libc::S_IFMT, libc::S_IFREG);
+    assert_eq!(file1_attr.st_mode as u32 & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFREG));
 
     // Test getattr on directory
     let dir1_name = CString::new("dir1").unwrap();
     let dir1_entry = fs.lookup(Context::default(), 1, &dir1_name)?;
     let (dir1_attr, _) = fs.getattr(Context::default(), dir1_entry.inode, None)?;
     assert_eq!(dir1_attr.st_mode & 0o777, 0o755);
-    assert_eq!(dir1_attr.st_mode & libc::S_IFMT, libc::S_IFDIR);
+    assert_eq!(dir1_attr.st_mode as u32 & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFDIR));
 
     // Test getattr on file in upper layer
     let file2_name = CString::new("file2").unwrap();
     let file2_entry = fs.lookup(Context::default(), 1, &file2_name)?;
     let (file2_attr, _) = fs.getattr(Context::default(), file2_entry.inode, None)?;
     assert_eq!(file2_attr.st_mode & 0o777, 0o600);
-    assert_eq!(file2_attr.st_mode & libc::S_IFMT, libc::S_IFREG);
+    assert_eq!(file2_attr.st_mode as u32 & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFREG));
 
     // Test getattr on shadowed file - should get attributes from upper layer
     let shadowed_name = CString::new("shadowed").unwrap();
@@ -67,7 +67,7 @@ fn test_getattr_basic() -> io::Result<()> {
         0o600,
         "Should get mode from upper layer's shadowed file"
     );
-    assert_eq!(shadowed_attr.st_mode & libc::S_IFMT, libc::S_IFREG);
+    assert_eq!(shadowed_attr.st_mode as u32 & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFREG));
 
     Ok(())
 }
@@ -249,12 +249,12 @@ fn test_getattr_complex() -> io::Result<()> {
     // Test 3: Directory attributes
     // 3a. dir1 should exist and be a directory
     let (dir1_attr, _) = fs.getattr(Context::default(), dir1_entry.inode, None)?;
-    assert_eq!(dir1_attr.st_mode & libc::S_IFMT, libc::S_IFDIR);
+    assert_eq!(dir1_attr.st_mode as u32 & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFDIR));
     assert_eq!(dir1_attr.st_mode & 0o777, 0o755);
 
     // 3b. dir2 should exist and be a directory
     let (dir2_attr, _) = fs.getattr(Context::default(), dir2_entry.inode, None)?;
-    assert_eq!(dir2_attr.st_mode & libc::S_IFMT, libc::S_IFDIR);
+    assert_eq!(dir2_attr.st_mode as u32 & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFDIR));
     assert_eq!(dir2_attr.st_mode & 0o777, 0o755);
 
     Ok(())
@@ -950,34 +950,34 @@ fn test_special_files_metadata() -> io::Result<()> {
         ctx,
         1,
         &fifo_name,
-        libc::S_IFIFO | 0o644,
+        mode_cast!(libc::S_IFIFO | 0o644),
         0,
         0o022,
         Extensions::default(),
     )?;
 
     // Verify initial attributes
-    assert_eq!(fifo_entry.attr.st_mode & libc::S_IFMT, libc::S_IFIFO);
+    assert_eq!(fifo_entry.attr.st_mode as u32 & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFIFO));
     assert_eq!(fifo_entry.attr.st_mode & 0o777, 0o644);
     assert_eq!(fifo_entry.attr.st_uid, 0);
     assert_eq!(fifo_entry.attr.st_gid, 0);
 
     // Test getattr
     let (attr, _) = fs.getattr(ctx, fifo_entry.inode, None)?;
-    assert_eq!(attr.st_mode & libc::S_IFMT, libc::S_IFIFO);
+    assert_eq!(attr.st_mode as u32 & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFIFO));
     assert_eq!(attr.st_mode & 0o777, 0o644);
 
     // Test setattr - change mode
     let mut new_attr = attr;
-    new_attr.st_mode = libc::S_IFIFO | 0o600;
+    new_attr.st_mode = mode_cast!(libc::S_IFIFO | 0o600) as u16;
     let valid = SetattrValid::MODE;
     let (updated_attr, _) = fs.setattr(ctx, fifo_entry.inode, new_attr, None, valid)?;
-    assert_eq!(updated_attr.st_mode & libc::S_IFMT, libc::S_IFIFO);
+    assert_eq!(updated_attr.st_mode as u32 & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFIFO));
     assert_eq!(updated_attr.st_mode & 0o777, 0o600);
 
     // Verify the change persists
     let (attr2, _) = fs.getattr(ctx, fifo_entry.inode, None)?;
-    assert_eq!(attr2.st_mode & libc::S_IFMT, libc::S_IFIFO);
+    assert_eq!(attr2.st_mode as u32 & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFIFO));
     assert_eq!(attr2.st_mode & 0o777, 0o600);
 
     // Test setattr - change uid/gid
@@ -987,7 +987,7 @@ fn test_special_files_metadata() -> io::Result<()> {
     let (updated_attr, _) = fs.setattr(ctx, fifo_entry.inode, new_attr, None, valid)?;
     assert_eq!(updated_attr.st_uid, 1000);
     assert_eq!(updated_attr.st_gid, 1000);
-    assert_eq!(updated_attr.st_mode & libc::S_IFMT, libc::S_IFIFO);
+    assert_eq!(updated_attr.st_mode as u32 & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFIFO));
 
     // Create a socket
     let sock_name = CString::new("test.sock").unwrap();
@@ -995,14 +995,14 @@ fn test_special_files_metadata() -> io::Result<()> {
         ctx,
         1,
         &sock_name,
-        libc::S_IFSOCK | 0o666,
+        mode_cast!(libc::S_IFSOCK | 0o666),
         0,
         0o022,
         Extensions::default(),
     )?;
 
     // Verify socket attributes
-    assert_eq!(sock_entry.attr.st_mode & libc::S_IFMT, libc::S_IFSOCK);
+    assert_eq!(sock_entry.attr.st_mode as u32 & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFSOCK));
     assert_eq!(sock_entry.attr.st_mode & 0o777, 0o644);
 
     // Test access on special files
@@ -1019,7 +1019,7 @@ fn test_special_files_metadata() -> io::Result<()> {
         assert_eq!(parts[0], "1000"); // Updated uid
         assert_eq!(parts[1], "1000"); // Updated gid
         let mode = u32::from_str_radix(parts[2], 8).unwrap();
-        assert_eq!(mode & libc::S_IFMT, libc::S_IFIFO, "xattr should preserve file type");
+        assert_eq!(mode & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFIFO), "xattr should preserve file type");
         assert_eq!(mode & 0o777, 0o600, "xattr should have updated permissions");
     }
 
@@ -1027,34 +1027,34 @@ fn test_special_files_metadata() -> io::Result<()> {
     let block_name = CString::new("test.blk").unwrap();
     let major = 8u32;  // Typical SCSI disk major
     let minor = 1u32;
-    let rdev = libc::makedev(major, minor) as u32;
+    let rdev = libc::makedev(major as i32, minor as i32) as u32;
     
     let block_entry = fs.mknod(
         ctx,
         1,
         &block_name,
-        libc::S_IFBLK | 0o660,
+        mode_cast!(libc::S_IFBLK | 0o660),
         rdev,
         0o022,
         Extensions::default(),
     )?;
     
     // Verify initial attributes including rdev
-    assert_eq!(block_entry.attr.st_mode & libc::S_IFMT, libc::S_IFBLK);
+    assert_eq!(block_entry.attr.st_mode as u32 & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFBLK));
     assert_eq!(block_entry.attr.st_mode & 0o777, 0o640);
     assert_eq!(block_entry.attr.st_rdev as u64, rdev as u64);
     
     // Test getattr preserves rdev
     let (attr, _) = fs.getattr(ctx, block_entry.inode, None)?;
-    assert_eq!(attr.st_mode & libc::S_IFMT, libc::S_IFBLK);
+    assert_eq!(attr.st_mode as u32 & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFBLK));
     assert_eq!(attr.st_rdev as u64, rdev as u64);
     
     // Test setattr preserves rdev when changing other attributes
     let mut new_attr = attr;
-    new_attr.st_mode = libc::S_IFBLK | 0o600;
+    new_attr.st_mode = mode_cast!(libc::S_IFBLK | 0o600) as u16;
     let valid = SetattrValid::MODE;
     let (updated_attr, _) = fs.setattr(ctx, block_entry.inode, new_attr, None, valid)?;
-    assert_eq!(updated_attr.st_mode & libc::S_IFMT, libc::S_IFBLK);
+    assert_eq!(updated_attr.st_mode as u32 & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFBLK));
     assert_eq!(updated_attr.st_mode & 0o777, 0o600);
     assert_eq!(updated_attr.st_rdev as u64, rdev as u64, "rdev should be preserved during setattr");
     
@@ -1069,7 +1069,7 @@ fn test_special_files_metadata() -> io::Result<()> {
         assert_eq!(parts[0], "0"); // uid
         assert_eq!(parts[1], "0"); // gid
         let mode = u32::from_str_radix(parts[2], 8).unwrap();
-        assert_eq!(mode & libc::S_IFMT, libc::S_IFBLK, "xattr should preserve file type");
+        assert_eq!(mode & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFBLK), "xattr should preserve file type");
         assert_eq!(mode & 0o777, 0o600, "xattr should have updated permissions");
         let xattr_rdev = u64::from_str_radix(parts[3], 10).unwrap();
         assert_eq!(xattr_rdev, rdev as u64, "xattr should preserve rdev");
@@ -1079,20 +1079,20 @@ fn test_special_files_metadata() -> io::Result<()> {
     let char_name = CString::new("test.chr").unwrap();
     let char_major = 1u32;  // Typical mem device major
     let char_minor = 3u32;  // /dev/null
-    let char_rdev = libc::makedev(char_major, char_minor) as u32;
+    let char_rdev = libc::makedev(char_major as i32, char_minor as i32) as u32;
     
     let char_entry = fs.mknod(
         ctx,
         1,
         &char_name,
-        libc::S_IFCHR | 0o666,
+        mode_cast!(libc::S_IFCHR | 0o666),
         char_rdev,
         0o022,
         Extensions::default(),
     )?;
     
     // Verify rdev is preserved
-    assert_eq!(char_entry.attr.st_mode & libc::S_IFMT, libc::S_IFCHR);
+    assert_eq!(char_entry.attr.st_mode as u32 & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFCHR));
     assert_eq!(char_entry.attr.st_rdev as u64, char_rdev as u64);
 
     Ok(())

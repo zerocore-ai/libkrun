@@ -1,6 +1,7 @@
 use std::{ffi::CString, fs, io};
 
 use crate::virtio::{
+    bindings,
     fs::filesystem::{Context, Extensions, FileSystem},
     fuse::FsOptions,
 };
@@ -48,7 +49,7 @@ fn test_mkdir_basic() -> io::Result<()> {
     // Verify override xattr was set with context uid/gid
     let xattr_value = helper::get_xattr(&dir_path, "user.containers.override_stat")?;
     assert!(xattr_value.is_some(), "Override xattr should be set");
-    
+
     let xattr_str = xattr_value.unwrap();
     let parts: Vec<&str> = xattr_str.split(':').collect();
     assert_eq!(parts.len(), 3);
@@ -86,7 +87,7 @@ fn test_mkdir_with_context() -> io::Result<()> {
     let dir_path = temp_dir.path().join("custom_dir");
     let xattr_value = helper::get_xattr(&dir_path, "user.containers.override_stat")?;
     assert!(xattr_value.is_some());
-    
+
     let xattr_str = xattr_value.unwrap();
     let parts: Vec<&str> = xattr_str.split(':').collect();
     assert_eq!(parts[0], "2500"); // Custom uid
@@ -125,7 +126,7 @@ fn test_create_file_basic() -> io::Result<()> {
         1,
         &file_name,
         0o644,
-        libc::O_CREAT as u32,
+        bindings::LINUX_O_CREAT as u32,
         0o022,
         Extensions::default(),
     )?;
@@ -143,7 +144,7 @@ fn test_create_file_basic() -> io::Result<()> {
     // Verify override xattr was set
     let xattr_value = helper::get_xattr(&file_path, "user.containers.override_stat")?;
     assert!(xattr_value.is_some(), "Override xattr should be set");
-    
+
     let xattr_str = xattr_value.unwrap();
     let parts: Vec<&str> = xattr_str.split(':').collect();
     assert_eq!(parts[0], "1000"); // Context default uid
@@ -180,7 +181,7 @@ fn test_create_file_with_umask() -> io::Result<()> {
         1,
         &file_name,
         0o777, // Request all permissions
-        libc::O_CREAT as u32,
+        bindings::LINUX_O_CREAT as u32,
         0o027, // umask removes group write and all other permissions
         Extensions::default(),
     )?;
@@ -192,7 +193,7 @@ fn test_create_file_with_umask() -> io::Result<()> {
     let file_path = temp_dir.path().join("umask_file");
     let xattr_value = helper::get_xattr(&file_path, "user.containers.override_stat")?;
     assert!(xattr_value.is_some());
-    
+
     let xattr_str = xattr_value.unwrap();
     let parts: Vec<&str> = xattr_str.split(':').collect();
     assert_eq!(parts[2], "0100750"); // full mode in octal (S_IFREG | 0750)
@@ -227,35 +228,35 @@ fn test_mknod_basic() -> io::Result<()> {
         ctx,
         1,
         &fifo_name,
-        libc::S_IFIFO | 0o660,
+        mode_cast!(libc::S_IFIFO | 0o660),
         0,
         0,
         Extensions::default(),
     )?;
 
     // Verify the FIFO was created
-    assert_eq!(entry.attr.st_mode & libc::S_IFMT, libc::S_IFIFO);
+    assert_eq!(entry.attr.st_mode as u32 & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFIFO));
     assert_eq!(entry.attr.st_mode & 0o777, 0o660);
 
     // Verify the file exists on disk
     let fifo_path = temp_dir.path().join("test_fifo");
     assert!(fifo_path.exists());
     let metadata = fs::metadata(&fifo_path)?;
-    
+
     // Check that the file on disk is actually a regular file (not a special file)
     // since we now create special files as regular files to support xattr
     assert!(metadata.file_type().is_file(), "Special files should be stored as regular files");
-    
+
     // Verify xattr was set correctly with the full mode (including file type)
     let xattr_value = helper::get_xattr(&fifo_path, "user.containers.override_stat")?;
     assert!(xattr_value.is_some(), "Override xattr should be set on special files");
-    
+
     // Parse the xattr to verify it contains the correct file type
     if let Some(xattr) = xattr_value {
         let parts: Vec<&str> = xattr.split(':').collect();
         assert_eq!(parts.len(), 3, "xattr should have format uid:gid:mode");
         let stored_mode = u32::from_str_radix(parts[2], 8).expect("mode should be valid octal");
-        assert_eq!(stored_mode & libc::S_IFMT, libc::S_IFIFO, 
+        assert_eq!(stored_mode & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFIFO),
             "xattr should store the correct file type");
     }
 
@@ -339,7 +340,7 @@ fn test_create_nested() -> io::Result<()> {
         parent_entry.inode,
         &file_name,
         0o666,
-        libc::O_CREAT as u32,
+        bindings::LINUX_O_CREAT as u32,
         0o022,
         Extensions::default(),
     )?;
@@ -350,7 +351,7 @@ fn test_create_nested() -> io::Result<()> {
     let file_path = temp_dir.path().join("parent/nested_file");
     let xattr_value = helper::get_xattr(&file_path, "user.containers.override_stat")?;
     assert!(xattr_value.is_some());
-    
+
     let xattr_str = xattr_value.unwrap();
     let parts: Vec<&str> = xattr_str.split(':').collect();
     assert_eq!(parts[0], "3000"); // Custom uid
@@ -377,7 +378,7 @@ fn test_create_nested() -> io::Result<()> {
     let dir_path = temp_dir.path().join("parent/child/nested_dir");
     let xattr_value = helper::get_xattr(&dir_path, "user.containers.override_stat")?;
     assert!(xattr_value.is_some());
-    
+
     let xattr_str = xattr_value.unwrap();
     let parts: Vec<&str> = xattr_str.split(':').collect();
     assert_eq!(parts[0], "3000"); // Custom uid
@@ -414,7 +415,7 @@ fn test_create_duplicate_name() -> io::Result<()> {
         1,
         &file_name,
         0o644,
-        libc::O_CREAT as u32 | libc::O_EXCL as u32, // O_EXCL should fail if exists
+        bindings::LINUX_O_CREAT as u32 | bindings::LINUX_O_EXCL as u32, // O_EXCL should fail if exists
         0,
         Extensions::default(),
     );

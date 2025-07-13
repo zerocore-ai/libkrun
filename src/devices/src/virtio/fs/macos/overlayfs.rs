@@ -1741,7 +1741,8 @@ impl OverlayFs {
             };
 
             let mode = if valid.contains(SetattrValid::MODE) {
-                Some(attr.st_mode & 0o7777)
+                // Preserve file type bits from current stat, update permission bits from attr
+                Some((updated_stat.st_mode & libc::S_IFMT) | (attr.st_mode & 0o7777))
             } else {
                 None
             };
@@ -1889,11 +1890,13 @@ impl OverlayFs {
             let stat = Self::unpatched_stat(&FileId::Path(c_path.clone()))?;
 
             // Set ownership and permissions
+            // Combine the file type bits from stat with the requested permission bits
+            let full_mode = (stat.st_mode & libc::S_IFMT) | ((mode & !umask) as u16);
             Self::set_override_xattr(
                 &FileId::Path(c_path.clone()),
                 &stat,
                 Some((ctx.uid, ctx.gid)),
-                Some((mode & !umask) as u16),
+                Some(full_mode),
                 None,
             )?;
 
@@ -2604,18 +2607,20 @@ impl OverlayFs {
 
         // Set ownership and permissions
         // For device nodes, include rdev
-        let device_rdev = if (mode & libc::S_IFMT) == libc::S_IFBLK ||
-                             (mode & libc::S_IFMT) == libc::S_IFCHR {
+        let device_rdev = if (mode & libc::S_IFMT as u32) == libc::S_IFBLK as u32 ||
+                             (mode & libc::S_IFMT as u32) == libc::S_IFCHR as u32 {
             Some(rdev)
         } else {
             None
         };
         
+        // Combine the file type bits from mode with the permission bits after applying umask
+        let full_mode = (mode & libc::S_IFMT as u32) | ((mode & !umask) & 0o777);
         if let Err(e) = Self::set_override_xattr(
             &FileId::Fd(fd),
             &stat,
             Some((ctx.uid, ctx.gid)),
-            Some((mode & !umask) as u16),
+            Some(full_mode as u16),
             device_rdev,
         ) {
             unsafe { libc::close(fd) };

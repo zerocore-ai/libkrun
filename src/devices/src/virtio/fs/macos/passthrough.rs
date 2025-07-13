@@ -188,14 +188,19 @@ fn is_valid_owner(owner: Option<(u32, u32)>) -> bool {
 // We won't need this once expressions like "if let ... &&" are allowed.
 #[allow(clippy::unnecessary_unwrap)]
 fn set_xattr_stat(file: StatFile, owner: Option<(u32, u32)>, mode: Option<u32>, rdev: Option<u32>) -> io::Result<()> {
-    let (new_owner, new_mode) = if is_valid_owner(owner) && mode.is_some() {
-        (owner.unwrap(), mode.unwrap())
+    let (new_owner, new_mode, orig_rdev) = if is_valid_owner(owner) && mode.is_some() {
+        (owner.unwrap(), mode.unwrap(), None)
     } else {
         let (orig_owner, orig_mode, orig_rdev) =
             if let Some((xuid, xgid, xmode, xrdev)) = get_xattr_stat(file.clone())? {
                 ((xuid, xgid), xmode, xrdev)
             } else {
-                ((0, 0), 0o0777, None)
+                // Get the actual file mode from the filesystem when there's no xattr
+                let st = match &file {
+                    StatFile::Path(path) => lstat(path, false)?,
+                    StatFile::Fd(fd) => fstat(*fd, false)?,
+                };
+                ((st.st_uid, st.st_gid), st.st_mode as u32, None)
             };
 
         let new_owner = match owner {
@@ -207,7 +212,7 @@ fn set_xattr_stat(file: StatFile, owner: Option<(u32, u32)>, mode: Option<u32>, 
             None => orig_owner,
         };
 
-        (new_owner, mode.unwrap_or(orig_mode))
+        (new_owner, mode.unwrap_or(orig_mode), orig_rdev)
     };
 
     // Determine the final rdev - use provided rdev or preserve original
@@ -215,8 +220,8 @@ fn set_xattr_stat(file: StatFile, owner: Option<(u32, u32)>, mode: Option<u32>, 
     
     // Format the xattr value - include rdev for device nodes
     let buf = if let Some(device) = final_rdev {
-        let file_type = new_mode & libc::S_IFMT;
-        if file_type == libc::S_IFBLK || file_type == libc::S_IFCHR {
+        let file_type = new_mode & libc::S_IFMT as u32;
+        if file_type == libc::S_IFBLK as u32 || file_type == libc::S_IFCHR as u32 {
             format!("{}:{}:0{:o}:{}", new_owner.0, new_owner.1, new_mode, device)
         } else {
             format!("{}:{}:0{:o}", new_owner.0, new_owner.1, new_mode)
@@ -289,8 +294,8 @@ fn fstat(fd: RawFd, host: bool) -> io::Result<bindings::stat64> {
                 
                 // For device nodes, also update rdev
                 if let Some(device) = rdev {
-                    let file_type = mode & libc::S_IFMT;
-                    if file_type == libc::S_IFBLK || file_type == libc::S_IFCHR {
+                    let file_type = mode & libc::S_IFMT as u32;
+                    if file_type == libc::S_IFBLK as u32 || file_type == libc::S_IFCHR as u32 {
                         st.st_rdev = device as i32;
                     }
                 }
@@ -325,8 +330,8 @@ fn lstat(c_path: &CString, host: bool) -> io::Result<bindings::stat64> {
                 
                 // For device nodes, also update rdev
                 if let Some(device) = rdev {
-                    let file_type = mode & libc::S_IFMT;
-                    if file_type == libc::S_IFBLK || file_type == libc::S_IFCHR {
+                    let file_type = mode & libc::S_IFMT as u32;
+                    if file_type == libc::S_IFBLK as u32 || file_type == libc::S_IFCHR as u32 {
                         st.st_rdev = device as i32;
                     }
                 }
@@ -1138,10 +1143,14 @@ impl FileSystem for PassthroughFs {
                 set_secctx(StatFile::Path(&c_path), secctx, false)?
             };
 
+            // Get the stat to obtain the file type bits
+            let stat = lstat(&c_path, false)?;
+            // Combine the file type bits from stat with the requested permission bits
+            let full_mode = (stat.st_mode as u32 & libc::S_IFMT as u32) | (mode & !umask);
             set_xattr_stat(
                 StatFile::Path(&c_path),
                 Some((ctx.uid, ctx.gid)),
-                Some(mode & !umask),
+                Some(full_mode),
                 None,
             )?;
             self.do_lookup(parent, name)
@@ -1414,34 +1423,41 @@ impl FileSystem for PassthroughFs {
         };
 
         if valid.contains(SetattrValid::MODE) {
-            // Get current stat to check if it's a device node and preserve rdev
-            let current_rdev = match data {
+            // Get current stat to preserve file type bits and check if it's a device node
+            let (current_file_type, current_rdev) = match data {
                 Data::Handle(fd) => {
                     let st = fstat(fd, false)?;
-                    if (st.st_mode & libc::S_IFMT) == libc::S_IFBLK || 
-                       (st.st_mode & libc::S_IFMT) == libc::S_IFCHR {
+                    let file_type = st.st_mode as u32 & libc::S_IFMT as u32;
+                    let rdev = if (st.st_mode & libc::S_IFMT) == libc::S_IFBLK || 
+                                  (st.st_mode & libc::S_IFMT) == libc::S_IFCHR {
                         Some(st.st_rdev as u32)
                     } else {
                         None
-                    }
+                    };
+                    (file_type, rdev)
                 }
                 Data::FilePath => {
                     let st = lstat(&c_path, false)?;
-                    if (st.st_mode & libc::S_IFMT) == libc::S_IFBLK || 
-                       (st.st_mode & libc::S_IFMT) == libc::S_IFCHR {
+                    let file_type = st.st_mode as u32 & libc::S_IFMT as u32;
+                    let rdev = if (st.st_mode & libc::S_IFMT) == libc::S_IFBLK || 
+                                  (st.st_mode & libc::S_IFMT) == libc::S_IFCHR {
                         Some(st.st_rdev as u32)
                     } else {
                         None
-                    }
+                    };
+                    (file_type, rdev)
                 }
             };
             
+            // Preserve file type bits from current stat, update permission bits from attr
+            let full_mode = current_file_type | (attr.st_mode as u32 & 0o7777);
+            
             match data {
                 Data::Handle(fd) => {
-                    set_xattr_stat(StatFile::Fd(fd), None, Some(attr.st_mode as u32), current_rdev)?
+                    set_xattr_stat(StatFile::Fd(fd), None, Some(full_mode), current_rdev)?
                 }
                 Data::FilePath => {
-                    set_xattr_stat(StatFile::Path(&c_path), None, Some(attr.st_mode as u32), current_rdev)?
+                    set_xattr_stat(StatFile::Path(&c_path), None, Some(full_mode), current_rdev)?
                 }
             }
         }
@@ -1611,17 +1627,19 @@ impl FileSystem for PassthroughFs {
             };
 
             // For device nodes, include rdev
-            let device_rdev = if (mode & libc::S_IFMT) == libc::S_IFBLK ||
-                                 (mode & libc::S_IFMT) == libc::S_IFCHR {
+            let device_rdev = if (mode & libc::S_IFMT as u32) == libc::S_IFBLK as u32 ||
+                                 (mode & libc::S_IFMT as u32) == libc::S_IFCHR as u32 {
                 Some(rdev)
             } else {
                 None
             };
             
+            // Preserve file type bits when applying umask
+            let full_mode = (mode & libc::S_IFMT as u32) | ((mode & !umask) & 0o777);
             if let Err(e) = set_xattr_stat(
                 StatFile::Fd(fd),
                 Some((ctx.uid, ctx.gid)),
-                Some(mode & !umask),
+                Some(full_mode),
                 device_rdev,
             ) {
                 unsafe { libc::close(fd) };

@@ -242,10 +242,13 @@ fn test_setattr_symlink() -> io::Result<()> {
     if xattr_value.is_some() {
         // Some filesystems support xattrs on symlinks
         let xattr_str = xattr_value.unwrap();
-    let parts: Vec<&str> = xattr_str.split(':').collect();
+        let parts: Vec<&str> = xattr_str.split(':').collect();
         assert_eq!(parts.len(), 3);
         assert_eq!(parts[0], "4000"); // uid
         assert_eq!(parts[1], "4000"); // gid
+        // Verify the mode includes symlink file type
+        let mode = u32::from_str_radix(parts[2], 8).unwrap();
+        assert_eq!(mode & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFLNK)); // Should be a symlink
     } else {
         // Filesystem doesn't support xattrs on symlinks, which is fine
         println!("Filesystem doesn't support xattrs on symlinks");
@@ -331,20 +334,23 @@ fn test_device_nodes_rdev() -> io::Result<()> {
     let block_name = CString::new("test.blk").unwrap();
     let major = 8u32;  // Typical SCSI disk major
     let minor = 1u32;
+    #[cfg(target_os = "linux")]
     let rdev = libc::makedev(major, minor) as u32;
+    #[cfg(target_os = "macos")]
+    let rdev = libc::makedev(major as i32, minor as i32) as u32;
 
     let block_entry = fs.mknod(
         ctx,
         1,
         &block_name,
-        libc::S_IFBLK | 0o660,
+        mode_cast!(libc::S_IFBLK | 0o660),
         rdev,
         0o022,
         Default::default(),
     )?;
 
     // Verify initial attributes including rdev
-    assert_eq!(block_entry.attr.st_mode & libc::S_IFMT, libc::S_IFBLK);
+    assert_eq!(block_entry.attr.st_mode as u32 & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFBLK));
     assert_eq!(block_entry.attr.st_mode & 0o777, 0o640);
     assert_eq!(block_entry.attr.st_rdev as u64, rdev as u64);
 
@@ -373,7 +379,7 @@ fn test_device_nodes_rdev() -> io::Result<()> {
         assert_eq!(parts[0], "1000"); // uid from context
         assert_eq!(parts[1], "1000"); // gid from context
         let mode = u32::from_str_radix(parts[2], 8).unwrap();
-        assert_eq!(mode & libc::S_IFMT, libc::S_IFBLK, "xattr should preserve file type");
+        assert_eq!(mode & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFBLK), "xattr should preserve file type");
         assert_eq!(mode & 0o777, 0o600, "xattr should have updated permissions");
         let xattr_rdev = u64::from_str_radix(parts[3], 10).unwrap();
         assert_eq!(xattr_rdev, rdev as u64, "xattr should preserve rdev");
@@ -383,20 +389,23 @@ fn test_device_nodes_rdev() -> io::Result<()> {
     let char_name = CString::new("test.chr").unwrap();
     let char_major = 1u32;  // Typical mem device major
     let char_minor = 3u32;  // /dev/null
+    #[cfg(target_os = "linux")]
     let char_rdev = libc::makedev(char_major, char_minor) as u32;
+    #[cfg(target_os = "macos")]
+    let char_rdev = libc::makedev(char_major as i32, char_minor as i32) as u32;
 
     let char_entry = fs.mknod(
         ctx,
         1,
         &char_name,
-        libc::S_IFCHR | 0o666,
+        mode_cast!(libc::S_IFCHR | 0o666),
         char_rdev,
         0o022,
         Default::default(),
     )?;
 
     // Verify rdev is preserved
-    assert_eq!(char_entry.attr.st_mode & libc::S_IFMT, libc::S_IFCHR);
+    assert_eq!(char_entry.attr.st_mode as u32 & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFCHR));
     assert_eq!(char_entry.attr.st_rdev as u64, char_rdev as u64);
 
     // Test FIFO (should not have rdev in xattr)
@@ -405,7 +414,7 @@ fn test_device_nodes_rdev() -> io::Result<()> {
         ctx,
         1,
         &fifo_name,
-        libc::S_IFIFO | 0o644,
+        mode_cast!(libc::S_IFIFO | 0o644),
         0,
         0o022,
         Default::default(),

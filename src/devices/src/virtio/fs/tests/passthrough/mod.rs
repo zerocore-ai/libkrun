@@ -1,9 +1,32 @@
+//--------------------------------------------------------------------------------------------------
+// Macros
+//--------------------------------------------------------------------------------------------------
+
+// Helper macro to handle platform differences in mode constants
+// On Linux, libc mode constants are u32, on macOS they are u16
+#[cfg(test)]
+macro_rules! mode_cast {
+    ($mode:expr) => {{
+        #[cfg(target_os = "macos")]
+        {
+            $mode as u32
+        }
+        #[cfg(target_os = "linux")]
+        {
+            $mode
+        }
+    }};
+}
+
+//--------------------------------------------------------------------------------------------------
+// Modules
+//--------------------------------------------------------------------------------------------------
+
 #[cfg(test)]
 mod create;
 
 #[cfg(test)]
 mod metadata;
-
 
 //--------------------------------------------------------------------------------------------------
 // Modules: Helper
@@ -11,18 +34,11 @@ mod metadata;
 
 #[cfg(test)]
 mod helper {
-    use std::{
-        fs,
-        io,
-        os::unix::fs::PermissionsExt,
-        path::PathBuf,
-        process::Command,
-    };
+    use std::{fs, io, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
 
     use crate::virtio::fs::passthrough::{Config, PassthroughFs};
 
     use tempfile::TempDir;
-
 
     //--------------------------------------------------------------------------------------------------
     // Functions
@@ -70,7 +86,9 @@ mod helper {
     // Debug utility to print the directory structure using tree command
     pub(super) fn debug_print_dir(temp_dir: &TempDir, show_perms: bool) -> io::Result<()> {
         if Command::new("tree").arg("--version").output().is_err() {
-            println!("tree command is not accessible. please install it to see the directory structure.");
+            println!(
+                "tree command is not accessible. please install it to see the directory structure."
+            );
             return Ok(());
         }
 
@@ -105,19 +123,51 @@ mod helper {
         let path_cstr = CString::new(path.to_string_lossy().as_bytes())?;
         let key_cstr = CString::new(key)?;
 
+        // Check if path is a symlink
+        let metadata = std::fs::symlink_metadata(path)?;
+        let is_symlink = metadata.file_type().is_symlink();
+
         let mut buf = vec![0u8; 256];
 
+        #[cfg(target_os = "macos")]
         let res = unsafe {
+            let options = if is_symlink { libc::XATTR_NOFOLLOW } else { 0 };
             libc::getxattr(
                 path_cstr.as_ptr(),
                 key_cstr.as_ptr(),
                 buf.as_mut_ptr() as *mut libc::c_void,
                 buf.len(),
+                0,
+                options,
             )
+        };
+
+        #[cfg(target_os = "linux")]
+        let res = unsafe {
+            if is_symlink {
+                libc::lgetxattr(
+                    path_cstr.as_ptr(),
+                    key_cstr.as_ptr(),
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    buf.len(),
+                )
+            } else {
+                libc::getxattr(
+                    path_cstr.as_ptr(),
+                    key_cstr.as_ptr(),
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    buf.len(),
+                )
+            }
         };
 
         if res < 0 {
             let err = io::Error::last_os_error();
+            #[cfg(target_os = "macos")]
+            if err.raw_os_error() == Some(libc::ENOATTR) {
+                return Ok(None);
+            }
+            #[cfg(target_os = "linux")]
             if err.raw_os_error() == Some(libc::ENODATA) {
                 return Ok(None);
             }
@@ -136,14 +186,42 @@ mod helper {
         let key_cstr = CString::new(key)?;
         let value_bytes = value.as_bytes();
 
+        // Check if path is a symlink
+        let metadata = std::fs::symlink_metadata(path)?;
+        let is_symlink = metadata.file_type().is_symlink();
+
+        #[cfg(target_os = "macos")]
         let res = unsafe {
+            let options = if is_symlink { libc::XATTR_NOFOLLOW } else { 0 };
             libc::setxattr(
                 path_cstr.as_ptr(),
                 key_cstr.as_ptr(),
                 value_bytes.as_ptr() as *const libc::c_void,
                 value_bytes.len(),
                 0,
+                options,
             )
+        };
+
+        #[cfg(target_os = "linux")]
+        let res = unsafe {
+            if is_symlink {
+                libc::lsetxattr(
+                    path_cstr.as_ptr(),
+                    key_cstr.as_ptr(),
+                    value_bytes.as_ptr() as *const libc::c_void,
+                    value_bytes.len(),
+                    0,
+                )
+            } else {
+                libc::setxattr(
+                    path_cstr.as_ptr(),
+                    key_cstr.as_ptr(),
+                    value_bytes.as_ptr() as *const libc::c_void,
+                    value_bytes.len(),
+                    0,
+                )
+            }
         };
 
         if res < 0 {

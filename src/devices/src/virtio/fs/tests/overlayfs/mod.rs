@@ -1,3 +1,21 @@
+//--------------------------------------------------------------------------------------------------
+// Common macros for tests
+//--------------------------------------------------------------------------------------------------
+
+// Helper macro to handle platform differences in mode constants
+// On Linux, libc mode constants are u32, on macOS they are u16
+#[cfg(test)]
+macro_rules! mode_cast {
+    ($mode:expr) => {
+        {
+            #[cfg(target_os = "macos")]
+            { $mode as u32 }
+            #[cfg(target_os = "linux")]
+            { $mode }
+        }
+    };
+}
+
 #[cfg(test)]
 mod create;
 
@@ -222,6 +240,19 @@ mod helper {
 
         let mut buf = vec![0u8; 256];
 
+        #[cfg(target_os = "macos")]
+        let res = unsafe {
+            libc::getxattr(
+                path_cstr.as_ptr(),
+                key_cstr.as_ptr(),
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+                0,
+                0,
+            )
+        };
+
+        #[cfg(target_os = "linux")]
         let res = unsafe {
             libc::getxattr(
                 path_cstr.as_ptr(),
