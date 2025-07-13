@@ -230,7 +230,7 @@ mod helper {
 
         Ok(())
     }
-    
+
     // Helper to get xattr value for testing
     pub(super) fn get_xattr(path: &PathBuf, key: &str) -> io::Result<Option<String>> {
         use std::ffi::CString;

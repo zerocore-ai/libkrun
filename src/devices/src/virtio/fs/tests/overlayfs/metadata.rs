@@ -969,7 +969,7 @@ fn test_special_files_metadata() -> io::Result<()> {
 
     // Test setattr - change mode
     let mut new_attr = attr;
-    new_attr.st_mode = mode_cast!(libc::S_IFIFO | 0o600);
+    new_attr.st_mode = libc::S_IFIFO | 0o600;
     let valid = SetattrValid::MODE;
     let (updated_attr, _) = fs.setattr(ctx, fifo_entry.inode, new_attr, None, valid)?;
     assert_eq!(updated_attr.st_mode as u32 & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFIFO));
@@ -1054,7 +1054,7 @@ fn test_special_files_metadata() -> io::Result<()> {
     
     // Test setattr preserves rdev when changing other attributes
     let mut new_attr = attr;
-    new_attr.st_mode = mode_cast!(libc::S_IFBLK | 0o600);
+    new_attr.st_mode = libc::S_IFBLK | 0o600;
     let valid = SetattrValid::MODE;
     let (updated_attr, _) = fs.setattr(ctx, block_entry.inode, new_attr, None, valid)?;
     assert_eq!(updated_attr.st_mode as u32 & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFBLK));
