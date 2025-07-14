@@ -320,6 +320,94 @@ fn test_init_krun_unlink_fails() -> io::Result<()> {
     Ok(())
 }
 
+#[test]
+#[cfg(not(feature = "efi"))]
+fn test_init_krun_getattr() -> io::Result<()> {
+    // Create test layers
+    let layers = vec![
+        vec![("regular_file", false, 0o644)], // Lower layer with a regular file
+        vec![],                               // Empty upper layer
+    ];
+
+    let (fs, temp_dirs) = helper::create_overlayfs(layers)?;
+    helper::debug_print_layers(&temp_dirs, false)?;
+
+    // Initialize filesystem
+    fs.init(FsOptions::empty())?;
+
+    // First lookup init.krun to get its inode
+    let init_krun_name = CString::new("init.krun").unwrap();
+    let entry = fs.lookup(Context::default(), 1, &init_krun_name)?;
+    let init_inode = entry.inode;
+
+    // Test getattr on init.krun
+    let (attr, timeout) = fs.getattr(Context::default(), init_inode, None)?;
+
+    // Verify the attributes match what we expect
+    assert_eq!(attr.st_ino, init_inode);
+    assert_eq!(attr.st_mode & libc::S_IFMT, libc::S_IFREG, "Should be a regular file");
+    assert_eq!(attr.st_mode & 0o777, 0o755, "Should have executable permissions");
+    assert_eq!(attr.st_nlink, 1, "Should have one link");
+    assert_eq!(attr.st_uid, 0, "Should be owned by root");
+    assert_eq!(attr.st_gid, 0, "Should be in root group");
+    assert_eq!(attr.st_blksize, 4096, "Block size should be 4096");
+    
+    // Verify size matches the embedded binary
+    let expected_size = fs.get_init_binary_size();
+    assert_eq!(attr.st_size, expected_size as i64, "Size should match the embedded binary");
+    
+    // Verify blocks calculation (rounded up to 512-byte blocks)
+    let expected_blocks = (expected_size as i64 + 511) / 512;
+    assert_eq!(attr.st_blocks, expected_blocks, "Blocks should be correctly calculated");
+
+    // Verify timeout is set correctly
+    assert!(timeout.as_secs() > 0, "Timeout should be positive");
+
+    // Test getattr on a regular file for comparison
+    let regular_name = CString::new("regular_file").unwrap();
+    let regular_entry = fs.lookup(Context::default(), 1, &regular_name)?;
+    let (regular_attr, _) = fs.getattr(Context::default(), regular_entry.inode, None)?;
+
+    // Verify the inodes are different
+    assert_ne!(attr.st_ino, regular_attr.st_ino, "init.krun should have a different inode than regular files");
+
+    Ok(())
+}
+
+#[test]
+#[cfg(not(feature = "efi"))]
+fn test_init_krun_getattr_after_open() -> io::Result<()> {
+    // Create test layers
+    let layers = vec![vec![]]; // Single empty layer
+
+    let (fs, temp_dirs) = helper::create_overlayfs(layers)?;
+    helper::debug_print_layers(&temp_dirs, false)?;
+
+    // Initialize filesystem
+    fs.init(FsOptions::empty())?;
+
+    // Lookup init.krun
+    let init_krun_name = CString::new("init.krun").unwrap();
+    let entry = fs.lookup(Context::default(), 1, &init_krun_name)?;
+
+    // Open the file
+    let (handle, _options) = fs.open(Context::default(), entry.inode, libc::O_RDONLY as u32)?;
+    assert!(handle.is_some(), "Should get a handle for init.krun");
+
+    // Test getattr with handle
+    let (attr_with_handle, _) = fs.getattr(Context::default(), entry.inode, handle)?;
+
+    // Test getattr without handle
+    let (attr_without_handle, _) = fs.getattr(Context::default(), entry.inode, None)?;
+
+    // Both should return the same attributes
+    assert_eq!(attr_with_handle.st_size, attr_without_handle.st_size);
+    assert_eq!(attr_with_handle.st_mode, attr_without_handle.st_mode);
+    assert_eq!(attr_with_handle.st_ino, attr_without_handle.st_ino);
+
+    Ok(())
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------

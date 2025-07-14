@@ -2130,6 +2130,21 @@ impl OverlayFs {
     }
 
     fn do_getattr(&self, inode: Inode) -> io::Result<(libc::stat64, Duration)> {
+        // Special handling for init.krun
+        #[cfg(not(feature = "efi"))]
+        if inode == self.init_inode {
+            let mut st: bindings::stat64 = unsafe { std::mem::zeroed() };
+            st.st_size = INIT_BINARY.len() as i64;
+            st.st_ino = self.init_inode;
+            st.st_mode = 0o100_755;
+            st.st_nlink = 1;
+            st.st_uid = 0;
+            st.st_gid = 0;
+            st.st_blksize = 4096;
+            st.st_blocks = (INIT_BINARY.len() as i64 + 511) / 512;
+            return Ok((st, self.config.attr_timeout));
+        }
+        
         let fd = self.get_inode_data(inode)?.file.as_raw_fd();
         let (st, _) = self.patched_statx(fd, None)?;
 

@@ -679,6 +679,20 @@ impl PassthroughFs {
     }
 
     fn do_getattr(&self, inode: Inode) -> io::Result<(libc::stat64, Duration)> {
+        // Special handling for init.krun
+        if inode == self.init_inode {
+            let mut st: libc::stat64 = unsafe { mem::zeroed() };
+            st.st_size = INIT_BINARY.len() as i64;
+            st.st_ino = self.init_inode;
+            st.st_mode = 0o100_755;
+            st.st_nlink = 1;
+            st.st_uid = 0;
+            st.st_gid = 0;
+            st.st_blksize = 4096;
+            st.st_blocks = (INIT_BINARY.len() as i64 + 511) / 512;
+            return Ok((st, self.cfg.attr_timeout));
+        }
+        
         let data = self
             .inodes
             .read()
