@@ -28,15 +28,21 @@ mod create;
 #[cfg(test)]
 mod metadata;
 
+#[cfg(test)]
+mod init_krun;
+
 //--------------------------------------------------------------------------------------------------
 // Modules: Helper
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(test)]
 mod helper {
-    use std::{fs, io, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
+    use std::{fs::{self, File}, io, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
 
-    use crate::virtio::fs::passthrough::{Config, PassthroughFs};
+    use crate::virtio::{
+        fs::filesystem::{ZeroCopyReader, ZeroCopyWriter},
+        fs::passthrough::{Config, PassthroughFs},
+    };
 
     use tempfile::TempDir;
 
@@ -229,5 +235,79 @@ mod helper {
         }
 
         Ok(())
+    }
+
+    //--------------------------------------------------------------------------------------------------
+    // Types
+    //--------------------------------------------------------------------------------------------------
+
+    pub(super) struct TestContainer(pub(super) Vec<u8>);
+
+    //--------------------------------------------------------------------------------------------------
+    // Trait Implementations
+    //--------------------------------------------------------------------------------------------------
+
+    impl io::Write for TestContainer {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl ZeroCopyWriter for TestContainer {
+        fn write_from(&mut self, f: &File, count: usize, off: u64) -> io::Result<usize> {
+            use std::os::unix::fs::FileExt;
+
+            // Pre-allocate space in our vector to avoid reallocations
+            let original_len = self.0.len();
+            self.0.resize(original_len + count, 0);
+
+            // Read directly into our vector's buffer
+            let bytes_read = f.read_at(&mut self.0[original_len..original_len + count], off)?;
+
+            // Adjust the size to match what was actually read
+            self.0.truncate(original_len + bytes_read);
+
+            if bytes_read == 0 && count > 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "unexpected EOF",
+                ));
+            }
+
+            Ok(bytes_read)
+        }
+    }
+
+    impl io::Read for TestContainer {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let available = self.0.len();
+            if available == 0 {
+                return Ok(0);
+            }
+
+            let amt = std::cmp::min(buf.len(), available);
+            buf[..amt].copy_from_slice(&self.0[..amt]);
+            Ok(amt)
+        }
+    }
+
+    impl ZeroCopyReader for TestContainer {
+        fn read_to(&mut self, f: &File, count: usize, off: u64) -> io::Result<usize> {
+            use std::os::unix::fs::FileExt;
+
+            let available = self.0.len();
+            if available == 0 {
+                return Ok(0);
+            }
+
+            let to_write = std::cmp::min(count, available);
+            let written = f.write_at(&self.0[..to_write], off)?;
+            Ok(written)
+        }
     }
 }
