@@ -39,6 +39,7 @@ pub(super) const DIRENT_PADDING: [u8; 8] = [0; 8];
 ///
 /// - [`PassthroughFs`]: For direct passthrough access to the host filesystem
 /// - [`OverlayFs`]: For overlayfs functionality to combine multiple filesystem layers
+#[derive(Debug)]
 pub struct FsImplServer {
     fs: FsImpl,
     options: AtomicU64,

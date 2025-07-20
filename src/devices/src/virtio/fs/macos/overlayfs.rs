@@ -219,6 +219,7 @@ pub struct Config {
 ///   The filesystem will try to prevent adding whiteout entries directly.
 ///
 /// TODO: Need to implement entry caching to improve the performance of [`Self::lookup_segment_by_segment`].
+#[derive(Debug)]
 pub struct OverlayFs {
     /// Map of inodes by ID and alternative keys
     inodes: RwLock<MultikeyBTreeMap<Inode, InodeAltKey, Arc<InodeData>>>,
@@ -1012,7 +1013,7 @@ impl OverlayFs {
             stat.st_uid = uid;
             stat.st_gid = gid;
             stat.st_mode = mode as u16;
-            
+
             // For device nodes, also update rdev
             if let Some(device) = rdev {
                 let file_type = mode & libc::S_IFMT;
@@ -1094,7 +1095,7 @@ impl OverlayFs {
         let uid = item_to_value(parts[0], 10).unwrap_or(st.st_uid);
         let gid = item_to_value(parts[1], 10).unwrap_or(st.st_gid);
         let mode = item_to_value(parts[2], 8).unwrap_or(st.st_mode as u32) as u16;
-        
+
         // Parse rdev if present (for device nodes)
         let rdev = if parts.len() >= 4 {
             item_to_value(parts[3], 10)
@@ -1696,7 +1697,7 @@ impl OverlayFs {
             st.st_blocks = (INIT_BINARY.len() as i64 + 511) / 512;
             return Ok((st, self.config.attr_timeout));
         }
-        
+
         let c_path = self.inode_number_to_vol_path(inode)?;
         let st = Self::patched_stat(&FileId::Path(c_path))?;
 
@@ -2628,7 +2629,7 @@ impl OverlayFs {
         } else {
             None
         };
-        
+
         // Combine the file type bits from mode with the permission bits after applying umask
         let full_mode = (mode & libc::S_IFMT as u32) | ((mode & !umask) & 0o777);
         if let Err(e) = Self::set_override_xattr(

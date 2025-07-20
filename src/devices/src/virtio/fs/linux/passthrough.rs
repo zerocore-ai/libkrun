@@ -54,13 +54,14 @@ static INIT_BINARY: &[u8] = include_bytes!("../../../../../../init/init");
 type Inode = u64;
 type Handle = u64;
 
-#[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
 struct InodeAltKey {
     ino: libc::ino64_t,
     dev: libc::dev_t,
     mnt_id: u64,
 }
 
+#[derive(Debug)]
 struct InodeData {
     inode: Inode,
     // Most of these aren't actually files but ¯\_(ツ)_/¯.
@@ -70,6 +71,7 @@ struct InodeData {
     refcount: AtomicU64,
 }
 
+#[derive(Debug)]
 struct HandleData {
     inode: Inode,
     file: RwLock<File>,
@@ -145,7 +147,6 @@ fn unpatched_statx(f: &File) -> io::Result<(libc::stat64, u64)> {
         Err(io::Error::last_os_error())
     }
 }
-
 
 /// The caching policy that the file system should report to the FUSE client. By default the FUSE
 /// protocol uses close-to-open consistency. This means that any cached contents of the file are
@@ -264,6 +265,7 @@ impl Default for Config {
 /// that wish to serve only a specific directory should set up the environment so that that
 /// directory ends up as the root of the file system process. One way to accomplish this is via a
 /// combination of mount namespaces and the pivot_root system call.
+#[derive(Debug)]
 pub struct PassthroughFs {
     // File descriptors for various points in the file system tree. These fds are always opened with
     // the `O_PATH` option so they cannot be used for reading or writing any data. See the
@@ -323,7 +325,6 @@ impl PassthroughFs {
 
             fd
         };
-
 
         let cap_fowner =
             has_cap(None, CapSet::Effective, Capability::CAP_FOWNER).unwrap_or_default();
@@ -692,7 +693,7 @@ impl PassthroughFs {
             st.st_blocks = (INIT_BINARY.len() as i64 + 511) / 512;
             return Ok((st, self.cfg.attr_timeout));
         }
-        
+
         let data = self
             .inodes
             .read()
@@ -723,7 +724,6 @@ impl PassthroughFs {
             Err(io::Error::last_os_error())
         }
     }
-
 
     /// Validates a name to prevent path traversal attacks
     ///
@@ -780,7 +780,7 @@ impl PassthroughFs {
             // Update the full mode including file type bits
             // This is crucial for special files that are stored as regular files
             stat.st_mode = mode;
-            
+
             // For device nodes, also update rdev
             if let Some(device) = rdev {
                 let file_type = mode & libc::S_IFMT;
@@ -816,7 +816,8 @@ impl PassthroughFs {
 
         // Get the proc path for this fd
         let proc_path = format!("/proc/self/fd/{}", f.as_raw_fd());
-        let proc_cstr = CString::new(proc_path).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let proc_cstr =
+            CString::new(proc_path).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
 
         // Resolve the proc symlink to get the actual file path
         let mut target_path = vec![0u8; libc::PATH_MAX as usize];
@@ -833,7 +834,8 @@ impl PassthroughFs {
         }
 
         target_path.truncate(len as usize);
-        let actual_path = CString::new(target_path).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let actual_path =
+            CString::new(target_path).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
 
         // Determine if this is a symlink from the stat structure
         let is_symlink = (st.st_mode & libc::S_IFMT) == libc::S_IFLNK;
@@ -889,7 +891,7 @@ impl PassthroughFs {
         let uid = item_to_value(parts[0], 10).unwrap_or(st.st_uid);
         let gid = item_to_value(parts[1], 10).unwrap_or(st.st_gid);
         let mode = item_to_value(parts[2], 8).unwrap_or(st.st_mode);
-        
+
         // Parse rdev if present (for device nodes)
         let rdev = if parts.len() >= 4 {
             // Helper function to convert byte slice to u64 value
@@ -945,7 +947,8 @@ impl PassthroughFs {
 
         // Get the proc path for this fd
         let proc_path = format!("/proc/self/fd/{}", f.as_raw_fd());
-        let proc_cstr = CString::new(proc_path).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let proc_cstr =
+            CString::new(proc_path).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
 
         // Resolve the proc symlink to get the actual file path
         let mut target_path = vec![0u8; libc::PATH_MAX as usize];
@@ -962,7 +965,8 @@ impl PassthroughFs {
         }
 
         target_path.truncate(len as usize);
-        let actual_path = CString::new(target_path).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let actual_path =
+            CString::new(target_path).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
 
         // Determine if this is a symlink from the stat structure
         let is_symlink = (st.st_mode & libc::S_IFMT) == libc::S_IFLNK;
@@ -1031,13 +1035,7 @@ impl PassthroughFs {
         let (stat, _) = unpatched_statx(&f)?;
 
         // Set the override xattr with the context uid/gid
-        self.set_override_xattr(
-            &f,
-            &stat,
-            Some((ctx.uid, ctx.gid)),
-            mode,
-            rdev,
-        )?;
+        self.set_override_xattr(&f, &stat, Some((ctx.uid, ctx.gid)), mode, rdev)?;
 
         Ok(())
     }
@@ -1256,7 +1254,13 @@ impl FileSystem for PassthroughFs {
         let res = unsafe { libc::mkdirat(data.file.as_raw_fd(), name.as_ptr(), mode & !umask) };
         if res == 0 {
             // Set override xattr before lookup
-            self.set_override_xattr_before_lookup(&data.file, name, &ctx, Some(libc::S_IFDIR | (mode & !umask)), None)?;
+            self.set_override_xattr_before_lookup(
+                &data.file,
+                name,
+                &ctx,
+                Some(libc::S_IFDIR | (mode & !umask)),
+                None,
+            )?;
             self.do_lookup(parent, name)
         } else {
             Err(io::Error::last_os_error())
@@ -1378,7 +1382,13 @@ impl FileSystem for PassthroughFs {
         let file = RwLock::new(unsafe { File::from_raw_fd(fd) });
 
         // Set override xattr before lookup
-        self.set_override_xattr_before_lookup(&data.file, name, &ctx, Some(libc::S_IFREG | (mode & !(umask & 0o777))), None)?;
+        self.set_override_xattr_before_lookup(
+            &data.file,
+            name,
+            &ctx,
+            Some(libc::S_IFREG | (mode & !(umask & 0o777))),
+            None,
+        )?;
 
         let entry = self.do_lookup(parent, name)?;
 
@@ -1417,7 +1427,6 @@ impl FileSystem for PassthroughFs {
         _lock_owner: Option<u64>,
         _flags: u32,
     ) -> io::Result<usize> {
-        debug!("read: {:?}", inode);
         if inode == self.init_inode {
             let off: usize = offset
                 .try_into()
@@ -1507,7 +1516,8 @@ impl FileSystem for PassthroughFs {
         let (mut current_stat, _) = self.patched_statx(&inode_data.file)?;
 
         // Check if we need to update the override xattr
-        let needs_xattr_update = valid.intersects(SetattrValid::UID | SetattrValid::GID | SetattrValid::MODE);
+        let needs_xattr_update =
+            valid.intersects(SetattrValid::UID | SetattrValid::GID | SetattrValid::MODE);
 
         if needs_xattr_update {
             // Prepare owner values
@@ -1536,8 +1546,9 @@ impl FileSystem for PassthroughFs {
 
             // Update the override xattr
             // For device nodes, preserve the existing rdev
-            let rdev = if (current_stat.st_mode & libc::S_IFMT) == libc::S_IFBLK ||
-                        (current_stat.st_mode & libc::S_IFMT) == libc::S_IFCHR {
+            let rdev = if (current_stat.st_mode & libc::S_IFMT) == libc::S_IFBLK
+                || (current_stat.st_mode & libc::S_IFMT) == libc::S_IFCHR
+            {
                 Some(current_stat.st_rdev)
             } else {
                 None
@@ -1787,13 +1798,20 @@ impl FileSystem for PassthroughFs {
 
             // Set override xattr before lookup
             // For device nodes, include rdev
-            let device_rdev = if (mode & libc::S_IFMT) == libc::S_IFBLK ||
-                                 (mode & libc::S_IFMT) == libc::S_IFCHR {
+            let device_rdev = if (mode & libc::S_IFMT) == libc::S_IFBLK
+                || (mode & libc::S_IFMT) == libc::S_IFCHR
+            {
                 Some(rdev as u64)
             } else {
                 None
             };
-            self.set_override_xattr_before_lookup(&data.file, name, &ctx, Some(mode & !umask), device_rdev)?;
+            self.set_override_xattr_before_lookup(
+                &data.file,
+                name,
+                &ctx,
+                Some(mode & !umask),
+                device_rdev,
+            )?;
             self.do_lookup(parent, name)
         }
     }
@@ -1870,7 +1888,13 @@ impl FileSystem for PassthroughFs {
             unsafe { libc::symlinkat(linkname.as_ptr(), data.file.as_raw_fd(), name.as_ptr()) };
         if res == 0 {
             // Set override xattr before lookup
-            self.set_override_xattr_before_lookup(&data.file, name, &ctx, Some(libc::S_IFLNK | 0o777), None)?;
+            self.set_override_xattr_before_lookup(
+                &data.file,
+                name,
+                &ctx,
+                Some(libc::S_IFLNK | 0o777),
+                None,
+            )?;
             self.do_lookup(parent, name)
         } else {
             Err(io::Error::last_os_error())

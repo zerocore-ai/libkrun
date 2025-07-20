@@ -259,6 +259,7 @@ pub struct Config {
 ///   The filesystem will try to prevent adding whiteout entries directly.
 ///
 /// TODO: Need to implement entry caching to improve the performance of [`Self::lookup_segment_by_segment`].
+#[derive(Debug)]
 pub struct OverlayFs {
     /// Map of inodes by ID and alternative keys. The alternative keys allow looking up inodes by their
     /// underlying host filesystem inode number, device ID and mount ID.
@@ -658,7 +659,7 @@ impl OverlayFs {
             stat.st_uid = uid;
             stat.st_gid = gid;
             stat.st_mode = mode;
-            
+
             // For device nodes, also update rdev
             if let Some(device) = rdev {
                 let file_type = mode & libc::S_IFMT;
@@ -766,7 +767,7 @@ impl OverlayFs {
         let uid = item_to_value(parts[0], 10).unwrap_or(st.st_uid);
         let gid = item_to_value(parts[1], 10).unwrap_or(st.st_gid);
         let mode = item_to_value(parts[2], 8).unwrap_or(st.st_mode);
-        
+
         // Parse rdev if present (for device nodes)
         let rdev = if parts.len() >= 4 {
             // Helper function to convert byte slice to u64 value
@@ -2144,7 +2145,7 @@ impl OverlayFs {
             st.st_blocks = (INIT_BINARY.len() as i64 + 511) / 512;
             return Ok((st, self.config.attr_timeout));
         }
-        
+
         let fd = self.get_inode_data(inode)?.file.as_raw_fd();
         let (st, _) = self.patched_statx(fd, None)?;
 
@@ -2209,13 +2210,20 @@ impl OverlayFs {
 
             // Update extended attributes with new ownership/mode
             // For device nodes, preserve the existing rdev
-            let rdev = if (updated_stat.st_mode & libc::S_IFMT) == libc::S_IFBLK ||
-                        (updated_stat.st_mode & libc::S_IFMT) == libc::S_IFCHR {
+            let rdev = if (updated_stat.st_mode & libc::S_IFMT) == libc::S_IFBLK
+                || (updated_stat.st_mode & libc::S_IFMT) == libc::S_IFCHR
+            {
                 Some(updated_stat.st_rdev)
             } else {
                 None
             };
-            self.set_override_xattr(inode_data.file.as_raw_fd(), &updated_stat, owner, mode, rdev)?;
+            self.set_override_xattr(
+                inode_data.file.as_raw_fd(),
+                &updated_stat,
+                owner,
+                mode,
+                rdev,
+            )?;
 
             // Update the stat structure with new values
             if let Some((uid, gid)) = owner {
@@ -2403,13 +2411,13 @@ impl OverlayFs {
         // This is crucial for special files as we store them as regular files but need to
         // preserve their actual file type (FIFO, socket, block/char device)
         // For device nodes, include rdev
-        let device_rdev = if (mode & libc::S_IFMT) == libc::S_IFBLK ||
-                             (mode & libc::S_IFMT) == libc::S_IFCHR {
-            Some(rdev as u64)
-        } else {
-            None
-        };
-        
+        let device_rdev =
+            if (mode & libc::S_IFMT) == libc::S_IFBLK || (mode & libc::S_IFMT) == libc::S_IFCHR {
+                Some(rdev as u64)
+            } else {
+                None
+            };
+
         if let Err(e) = self.set_override_xattr(
             fd,
             &stat,
@@ -3149,6 +3157,7 @@ impl FileSystem for OverlayFs {
 
         let (entry, _) = self.do_lookup(parent, name)?;
         self.bump_refcount(entry.inode);
+
         Ok(entry)
     }
 

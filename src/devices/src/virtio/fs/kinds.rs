@@ -29,6 +29,7 @@ pub enum FsImplConfig {
     Overlayfs(overlayfs::Config),
 }
 
+#[derive(Debug)]
 pub enum FsImpl {
     Passthrough(PassthroughFs),
     Overlayfs(OverlayFs),

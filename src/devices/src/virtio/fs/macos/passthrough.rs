@@ -164,7 +164,7 @@ fn get_xattr_stat(file: StatFile) -> io::Result<Option<(u32, u32, u32, Option<u3
         },
         None => return Ok(None),
     };
-    
+
     // Parse rdev if present (for device nodes)
     let rdev = if let Some(item) = items.next() {
         item_to_value(item, 10)
@@ -217,7 +217,7 @@ fn set_xattr_stat(file: StatFile, owner: Option<(u32, u32)>, mode: Option<u32>, 
 
     // Determine the final rdev - use provided rdev or preserve original
     let final_rdev = rdev.or(orig_rdev);
-    
+
     // Format the xattr value - include rdev for device nodes
     let buf = if let Some(device) = final_rdev {
         let file_type = new_mode & libc::S_IFMT as u32;
@@ -291,7 +291,7 @@ fn fstat(fd: RawFd, host: bool) -> io::Result<bindings::stat64> {
                 } else {
                     st.st_mode = mode as u16;
                 }
-                
+
                 // For device nodes, also update rdev
                 if let Some(device) = rdev {
                     let file_type = mode & libc::S_IFMT as u32;
@@ -327,7 +327,7 @@ fn lstat(c_path: &CString, host: bool) -> io::Result<bindings::stat64> {
                 } else {
                     st.st_mode = mode as u16;
                 }
-                
+
                 // For device nodes, also update rdev
                 if let Some(device) = rdev {
                     let file_type = mode & libc::S_IFMT as u32;
@@ -461,6 +461,7 @@ impl Default for Config {
 /// that wish to serve only a specific directory should set up the environment so that that
 /// directory ends up as the root of the file system process. One way to accomplish this is via a
 /// combination of mount namespaces and the pivot_root system call.
+#[derive(Debug)]
 pub struct PassthroughFs {
     inodes: RwLock<MultikeyBTreeMap<Inode, InodeAltKey, Arc<InodeData>>>,
     next_inode: AtomicU64,
@@ -818,7 +819,7 @@ impl PassthroughFs {
             st.st_blocks = (INIT_BINARY.len() as i64 + 511) / 512;
             return Ok((st, self.cfg.attr_timeout));
         }
-        
+
         let c_path = self.inode_to_path(inode)?;
 
         let st = lstat(&c_path, false)?;
@@ -1443,7 +1444,7 @@ impl FileSystem for PassthroughFs {
                 Data::Handle(fd) => {
                     let st = fstat(fd, false)?;
                     let file_type = st.st_mode as u32 & libc::S_IFMT as u32;
-                    let rdev = if (st.st_mode & libc::S_IFMT) == libc::S_IFBLK || 
+                    let rdev = if (st.st_mode & libc::S_IFMT) == libc::S_IFBLK ||
                                   (st.st_mode & libc::S_IFMT) == libc::S_IFCHR {
                         Some(st.st_rdev as u32)
                     } else {
@@ -1454,7 +1455,7 @@ impl FileSystem for PassthroughFs {
                 Data::FilePath => {
                     let st = lstat(&c_path, false)?;
                     let file_type = st.st_mode as u32 & libc::S_IFMT as u32;
-                    let rdev = if (st.st_mode & libc::S_IFMT) == libc::S_IFBLK || 
+                    let rdev = if (st.st_mode & libc::S_IFMT) == libc::S_IFBLK ||
                                   (st.st_mode & libc::S_IFMT) == libc::S_IFCHR {
                         Some(st.st_rdev as u32)
                     } else {
@@ -1463,10 +1464,10 @@ impl FileSystem for PassthroughFs {
                     (file_type, rdev)
                 }
             };
-            
+
             // Preserve file type bits from current stat, update permission bits from attr
             let full_mode = current_file_type | (attr.st_mode as u32 & 0o7777);
-            
+
             match data {
                 Data::Handle(fd) => {
                     set_xattr_stat(StatFile::Fd(fd), None, Some(full_mode), current_rdev)?
@@ -1648,7 +1649,7 @@ impl FileSystem for PassthroughFs {
             } else {
                 None
             };
-            
+
             // Preserve file type bits when applying umask
             let full_mode = (mode & libc::S_IFMT as u32) | ((mode & !umask) & 0o777);
             if let Err(e) = set_xattr_stat(
