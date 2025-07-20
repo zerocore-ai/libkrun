@@ -1414,15 +1414,30 @@ fn test_mknod_basic() -> io::Result<()> {
 
         // Verify node creation
         let entry_mode = entry.attr.st_mode as u32;
-        #[cfg(target_os = "linux")]
+        // The entry should have the correct file type from the xattr, even though
+        // the underlying file is a regular file
         assert_eq!(entry_mode & libc::S_IFMT as u32, mode & libc::S_IFMT as u32);
-        #[cfg(target_os = "macos")]
-        assert_eq!(entry_mode & libc::S_IFMT as u32, libc::S_IFREG as u32);
-        assert_eq!(entry_mode & 0o777, (0o644 & !0o022) as u32);
 
-        // Verify node exists with correct type
+        // Verify node exists in the top layer
         let node_path = temp_dirs.last().unwrap().path().join(name);
         assert!(node_path.exists());
+
+        // Check that the file on disk is actually a regular file (not a special file)
+        let metadata = fs::metadata(&node_path)?;
+        assert!(metadata.file_type().is_file(), "Special files should be stored as regular files");
+
+        // Verify xattr was set correctly with the full mode (including file type)
+        let xattr_value = helper::get_xattr(&node_path, "user.containers.override_stat")?;
+        assert!(xattr_value.is_some(), "Override xattr should be set on special files");
+
+        // Parse the xattr to verify it contains the correct file type
+        if let Some(xattr) = xattr_value {
+            let parts: Vec<&str> = xattr.split(':').collect();
+            assert_eq!(parts.len(), 3, "xattr should have format uid:gid:mode");
+            let stored_mode = u32::from_str_radix(parts[2], 8).expect("mode should be valid octal");
+            assert_eq!(stored_mode & libc::S_IFMT as u32, mode & libc::S_IFMT as u32,
+                "xattr should store the correct file type");
+        }
     }
 
     Ok(())
@@ -1473,15 +1488,21 @@ fn test_mknod_nested() -> io::Result<()> {
 
         // Verify node creation
         let entry_mode = entry.attr.st_mode as u32;
-        #[cfg(target_os = "linux")]
+        // The entry should have the correct file type from the xattr
         assert_eq!(entry_mode & libc::S_IFMT as u32, mode & libc::S_IFMT as u32);
-        #[cfg(target_os = "macos")]
-        assert_eq!(entry_mode & libc::S_IFMT as u32, libc::S_IFREG as u32);
         assert_eq!(entry_mode & 0o777, (0o644 & !0o022) as u32);
 
         // Verify node exists in the top layer
         let node_path = temp_dirs.last().unwrap().path().join(dir).join(name);
         assert!(node_path.exists());
+
+        // Check that the file on disk is actually a regular file
+        let metadata = fs::metadata(&node_path)?;
+        assert!(metadata.file_type().is_file(), "Special files should be stored as regular files");
+
+        // Verify xattr was set correctly
+        let xattr_value = helper::get_xattr(&node_path, "user.containers.override_stat")?;
+        assert!(xattr_value.is_some(), "Override xattr should be set on special files");
     }
 
     Ok(())

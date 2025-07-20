@@ -11,3 +11,4 @@ init/init
 examples/chroot_vm
 test-prefix
 ignore/
+**/CLAUDE.md
