@@ -418,7 +418,7 @@ impl OverlayFs {
 
         // Process layers from top to bottom
         for (i, layer_path) in layers.iter().enumerate().rev() {
-            let layer_idx = i; // Layer index from bottom to top
+            let layer_idx = i;
 
             // Get the stat information for this layer's root
             let c_path = CString::new(layer_path.to_string_lossy().as_bytes())?;
@@ -654,7 +654,23 @@ impl OverlayFs {
         let (mut stat, mnt_id) = Self::unpatched_statx(fd, name)?;
 
         // Get owner and permissions from xattr
-        if let Ok(Some((uid, gid, mode, rdev))) = self.get_override_xattr(fd, &stat) {
+        // When name is provided, we need to open the file to get its xattr
+        let xattr_result = if let Some(name) = name {
+            // Open the file with O_PATH to get its fd
+            let file_fd =
+                unsafe { libc::openat(fd, name.as_ptr(), libc::O_PATH | libc::O_NOFOLLOW, 0) };
+            if file_fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let result = self.get_override_xattr(file_fd, &stat);
+            unsafe { libc::close(file_fd) };
+            result
+        } else {
+            // When no name is provided, fd refers to the file itself
+            self.get_override_xattr(fd, &stat)
+        };
+
+        if let Ok(Some((uid, gid, mode, rdev))) = xattr_result {
             // Update the stat with the xattr values if available
             stat.st_uid = uid;
             stat.st_gid = gid;
@@ -679,6 +695,20 @@ impl OverlayFs {
         fd: RawFd,
         st: &libc::stat64,
     ) -> io::Result<Option<(u32, u32, u32, Option<u64>)>> {
+        // Check file type and skip xattr operations for types that don't support them
+        let file_type = st.st_mode & libc::S_IFMT;
+        let is_symlink = file_type == libc::S_IFLNK;
+
+        // Skip xattr only for symlinks.
+        // Special files (FIFOs, sockets, device nodes) are stored as regular files in overlayfs,
+        // so we need to read their xattr to get the actual file type and permissions.
+        // NOTE: We cannot read virtualized ownership for symlinks because most filesystems
+        // don't support extended attributes on symlinks. This means symlink ownership will
+        // always reflect the host values, not virtualized container values.
+        if is_symlink {
+            return Ok(None);
+        }
+
         // Try to get the owner and permissions from xattr
         let mut buf: Vec<u8> = vec![0; 32];
 
@@ -713,29 +743,14 @@ impl OverlayFs {
         target_path.truncate(len as usize);
         let actual_path = CString::new(target_path).map_err(|_| einval())?;
 
-        // Determine if this is a symlink from the stat structure
-        let is_symlink = (st.st_mode & libc::S_IFMT) == libc::S_IFLNK;
-
-        let res = if is_symlink {
-            // For symlinks, use lgetxattr to get xattrs from the symlink itself
-            unsafe {
-                libc::lgetxattr(
-                    actual_path.as_ptr(),
-                    OVERRIDE_STAT_XATTR_KEY.as_ptr() as *const i8,
-                    buf.as_mut_ptr() as *mut libc::c_void,
-                    buf.len(),
-                )
-            }
-        } else {
-            // For regular files/directories, use getxattr
-            unsafe {
-                libc::getxattr(
-                    actual_path.as_ptr(),
-                    OVERRIDE_STAT_XATTR_KEY.as_ptr() as *const i8,
-                    buf.as_mut_ptr() as *mut libc::c_void,
-                    buf.len(),
-                )
-            }
+        // Always use getxattr (not lgetxattr) since we've already filtered out symlinks
+        let res = unsafe {
+            libc::getxattr(
+                actual_path.as_ptr(),
+                OVERRIDE_STAT_XATTR_KEY.as_ptr() as *const i8,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+            )
         };
 
         if res < 0 {
@@ -745,8 +760,8 @@ impl OverlayFs {
                 return Ok(None);
             }
 
-            // For symlinks, if xattrs aren't supported, return None (no override)
-            if err.raw_os_error() == Some(libc::EPERM) {
+            // If filesystem doesn't support xattrs, return None
+            if err.raw_os_error() == Some(libc::EOPNOTSUPP) {
                 return Ok(None);
             }
 
@@ -797,6 +812,28 @@ impl OverlayFs {
         mode: Option<u32>,
         rdev: Option<u64>,
     ) -> io::Result<()> {
+        // Check file type and skip xattr operations for types that don't support them
+        let file_type = st.st_mode & libc::S_IFMT;
+        let is_symlink = file_type == libc::S_IFLNK;
+
+        // Handle symlinks specially
+        if is_symlink {
+            // WARNING: While Linux allows changing symlink ownership via lchown(), we cannot
+            // virtualize this because most filesystems don't support extended attributes on
+            // symlinks. Symlink ownership matters for security:
+            // - Sticky bit directories (deletion/rename permissions)
+            // - fs.protected_symlinks security feature
+            //
+            // Return an error if trying to change ownership to prevent silent security failures.
+            // Mode changes are ignored since symlink permissions are always 0777 and meaningless.
+            if owner.is_some() {
+                debug!("Cannot virtualize symlink ownership changes");
+                return Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP));
+            }
+            // Mode-only changes are allowed but do nothing
+            return Ok(());
+        }
+
         // Get the current values to use as defaults
         let (uid, gid) = if let Some((uid, gid)) = owner {
             (uid, gid)
@@ -841,38 +878,22 @@ impl OverlayFs {
         target_path.truncate(len as usize);
         let actual_path = CString::new(target_path).map_err(|_| einval())?;
 
-        // Determine if this is a symlink from the stat structure
-        let is_symlink = (st.st_mode & libc::S_IFMT) == libc::S_IFLNK;
-
-        let res = if is_symlink {
-            // For symlinks, use lsetxattr to set xattrs on the symlink itself
-            unsafe {
-                libc::lsetxattr(
-                    actual_path.as_ptr(),
-                    OVERRIDE_STAT_XATTR_KEY.as_ptr() as *const i8,
-                    value_bytes.as_ptr() as *const libc::c_void,
-                    value_bytes.len(),
-                    0,
-                )
-            }
-        } else {
-            // For regular files/directories, use setxattr
-            unsafe {
-                libc::setxattr(
-                    actual_path.as_ptr(),
-                    OVERRIDE_STAT_XATTR_KEY.as_ptr() as *const i8,
-                    value_bytes.as_ptr() as *const libc::c_void,
-                    value_bytes.len(),
-                    0,
-                )
-            }
+        // Always use setxattr (not lsetxattr) since we've already filtered out symlinks
+        let res = unsafe {
+            libc::setxattr(
+                actual_path.as_ptr(),
+                OVERRIDE_STAT_XATTR_KEY.as_ptr() as *const i8,
+                value_bytes.as_ptr() as *const libc::c_void,
+                value_bytes.len(),
+                0,
+            )
         };
 
         if res < 0 {
             let err = io::Error::last_os_error();
-            // For symlinks, many filesystems don't support xattrs - handle gracefully
-            if err.raw_os_error() == Some(libc::EPERM) {
-                debug!("Filesystem doesn't support xattrs on this file type, continuing without virtualized ownership");
+            // Handle case where filesystem doesn't support xattrs
+            if err.raw_os_error() == Some(libc::EOPNOTSUPP) {
+                debug!("Filesystem doesn't support extended attributes, continuing without virtualized ownership");
                 return Ok(());
             }
             return Err(err);
@@ -2520,7 +2541,7 @@ impl OverlayFs {
 
     fn do_symlink(
         &self,
-        ctx: Context,
+        _ctx: Context,
         linkname: &CStr,
         parent: Inode,
         name: &CStr,
@@ -2557,20 +2578,13 @@ impl OverlayFs {
         if res == 0 {
             let file = self.open_file_at(parent_fd, name, libc::O_PATH)?.0;
 
-            // Get initial stat.
-            let (stat, _) = Self::unpatched_statx(file.as_raw_fd(), None)?;
+            // NOTE: On Linux, we cannot virtualize symlink ownership because most filesystems
+            // don't support extended attributes on symlinks. The symlink will have the
+            // ownership of the process that created it. This is a known limitation.
+            // We don't call set_override_xattr here because it would return EOPNOTSUPP.
 
-            // Set ownership and permissions
-            self.set_override_xattr(
-                file.as_raw_fd(),
-                &stat,
-                Some((ctx.uid, ctx.gid)),
-                Some(libc::S_IFLNK | 0777),
-                None,
-            )?;
-
-            // Get updated stat
-            let (updated_stat, mnt_id) = self.patched_statx(file.as_raw_fd(), None)?;
+            // Get stat (without virtualized ownership)
+            let (updated_stat, mnt_id) = Self::unpatched_statx(file.as_raw_fd(), None)?;
 
             let mut path = parent_data.path.clone();
             path.push(self.intern_name(name)?);

@@ -99,15 +99,24 @@ fn item_to_value(item: &[u8], radix: u32) -> Option<u32> {
 }
 
 fn get_xattr_stat(file: StatFile) -> io::Result<Option<(u32, u32, u32, Option<u32>)>> {
+    // First check if we should skip xattr operations
+    let st = match &file {
+        StatFile::Path(path) => lstat(path, false)?,
+        StatFile::Fd(fd) => fstat(*fd, false)?,
+    };
+    
+    // Check file type to determine if we need special handling
+    let file_type = st.st_mode & libc::S_IFMT;
+    let is_symlink = file_type == libc::S_IFLNK;
+
+    // macOS supports extended attributes on symlinks, unlike most Linux filesystems.
+    // We use XATTR_NOFOLLOW to operate on the symlink itself rather than following it.
+    // This allows us to fully virtualize symlink ownership on macOS.
+
     let mut buf: Vec<u8> = vec![0; 32];
+    let options = if is_symlink { libc::XATTR_NOFOLLOW } else { 0 };
     let res = match file {
         StatFile::Path(path) => unsafe {
-            let st = lstat(path, true)?;
-            let options = if (st.st_mode & libc::S_IFMT) == libc::S_IFLNK {
-                libc::XATTR_NOFOLLOW
-            } else {
-                0
-            };
             libc::getxattr(
                 path.as_ptr(),
                 XATTR_KEY.as_ptr() as *const i8,
@@ -118,12 +127,6 @@ fn get_xattr_stat(file: StatFile) -> io::Result<Option<(u32, u32, u32, Option<u3
             )
         },
         StatFile::Fd(fd) => unsafe {
-            let st = fstat(fd, true)?;
-            let options = if (st.st_mode & libc::S_IFMT) == libc::S_IFLNK {
-                libc::XATTR_NOFOLLOW
-            } else {
-                0
-            };
             libc::fgetxattr(
                 fd,
                 XATTR_KEY.as_ptr() as *const i8,
@@ -135,6 +138,10 @@ fn get_xattr_stat(file: StatFile) -> io::Result<Option<(u32, u32, u32, Option<u3
         },
     };
     if res < 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ENOATTR) || err.raw_os_error() == Some(libc::ENOTSUP) {
+            return Ok(None);
+        }
         debug!("fget_xattr error: {}", res);
         return Ok(None);
     }
@@ -188,6 +195,23 @@ fn is_valid_owner(owner: Option<(u32, u32)>) -> bool {
 // We won't need this once expressions like "if let ... &&" are allowed.
 #[allow(clippy::unnecessary_unwrap)]
 fn set_xattr_stat(file: StatFile, owner: Option<(u32, u32)>, mode: Option<u32>, rdev: Option<u32>) -> io::Result<()> {
+    // First check if we should skip xattr operations
+    let st = match &file {
+        StatFile::Path(path) => lstat(path, false)?,
+        StatFile::Fd(fd) => fstat(*fd, false)?,
+    };
+    
+    // Check file type and skip xattr operations for types that don't support them
+    let file_type = st.st_mode & libc::S_IFMT;
+    let is_symlink = file_type == libc::S_IFLNK;
+
+    // macOS supports extended attributes on symlinks, unlike most Linux filesystems.
+    // We use XATTR_NOFOLLOW to operate on the symlink itself rather than following it.
+    // This allows us to fully virtualize symlink ownership on macOS, providing better
+    // security isolation than what's possible on Linux.
+    // Note: While symlink permissions are always 0777 and ignored by the kernel,
+    // we still store them for consistency.
+
     let (new_owner, new_mode, orig_rdev) = if is_valid_owner(owner) && mode.is_some() {
         (owner.unwrap(), mode.unwrap(), None)
     } else {
@@ -196,10 +220,6 @@ fn set_xattr_stat(file: StatFile, owner: Option<(u32, u32)>, mode: Option<u32>, 
                 ((xuid, xgid), xmode, xrdev)
             } else {
                 // Get the actual file mode from the filesystem when there's no xattr
-                let st = match &file {
-                    StatFile::Path(path) => lstat(path, false)?,
-                    StatFile::Fd(fd) => fstat(*fd, false)?,
-                };
                 ((st.st_uid, st.st_gid), st.st_mode as u32, None)
             };
 
@@ -230,14 +250,9 @@ fn set_xattr_stat(file: StatFile, owner: Option<(u32, u32)>, mode: Option<u32>, 
         format!("{}:{}:0{:o}", new_owner.0, new_owner.1, new_mode)
     };
 
+    let options = if is_symlink { libc::XATTR_NOFOLLOW } else { 0 };
     let res = match file {
         StatFile::Path(path) => unsafe {
-            let st = lstat(path, true)?;
-            let options = if (st.st_mode & libc::S_IFMT) == libc::S_IFLNK {
-                libc::XATTR_NOFOLLOW
-            } else {
-                0
-            };
             libc::setxattr(
                 path.as_ptr(),
                 XATTR_KEY.as_ptr() as *const i8,
@@ -248,12 +263,6 @@ fn set_xattr_stat(file: StatFile, owner: Option<(u32, u32)>, mode: Option<u32>, 
             )
         },
         StatFile::Fd(fd) => unsafe {
-            let st = fstat(fd, true)?;
-            let options = if (st.st_mode & libc::S_IFMT) == libc::S_IFLNK {
-                libc::XATTR_NOFOLLOW
-            } else {
-                0
-            };
             libc::fsetxattr(
                 fd,
                 XATTR_KEY.as_ptr() as *const i8,
@@ -266,7 +275,13 @@ fn set_xattr_stat(file: StatFile, owner: Option<(u32, u32)>, mode: Option<u32>, 
     };
 
     if res < 0 {
-        Err(linux_error(io::Error::last_os_error()))
+        let err = io::Error::last_os_error();
+        // Handle case where filesystem doesn't support xattrs
+        if err.raw_os_error() == Some(libc::ENOTSUP) {
+            debug!("Filesystem doesn't support extended attributes, continuing without virtualized ownership");
+            return Ok(());
+        }
+        Err(linux_error(err))
     } else {
         Ok(())
     }
