@@ -6,14 +6,16 @@
 // On Linux, libc mode constants are u32, on macOS they are u16
 #[cfg(test)]
 macro_rules! mode_cast {
-    ($mode:expr) => {
+    ($mode:expr) => {{
+        #[cfg(target_os = "macos")]
         {
-            #[cfg(target_os = "macos")]
-            { $mode as u32 }
-            #[cfg(target_os = "linux")]
-            { $mode }
+            $mode as u32
         }
-    };
+        #[cfg(target_os = "linux")]
+        {
+            $mode
+        }
+    }};
 }
 
 #[cfg(test)]

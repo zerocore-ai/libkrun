@@ -1030,15 +1030,16 @@ impl OverlayFs {
         file: &FileId,
         st: &bindings::stat64,
     ) -> io::Result<Option<(u32, u32, u16, Option<u32>)>> {
+        // Check file type to determine if we need special handling
+        let file_type = st.st_mode & libc::S_IFMT;
+        let is_symlink = file_type == libc::S_IFLNK;
+
+        // macOS supports extended attributes on symlinks, unlike most Linux filesystems.
+        // We use XATTR_NOFOLLOW to operate on the symlink itself rather than following it.
+        // This allows us to fully virtualize symlink ownership on macOS.
+        
         // Try to get the owner and permissions from xattr
         let mut buf: Vec<u8> = vec![0; 32];
-
-        // Get options based on file type
-        let options = if (st.st_mode & libc::S_IFMT) == libc::S_IFLNK {
-            libc::XATTR_NOFOLLOW
-        } else {
-            0
-        };
 
         // Helper function to convert byte slice to u32 value
         fn item_to_value(item: &[u8], radix: u32) -> Option<u32> {
@@ -1051,7 +1052,8 @@ impl OverlayFs {
             }
         }
 
-        // Get the xattr
+        // Get the xattr, using XATTR_NOFOLLOW for symlinks
+        let options = if is_symlink { libc::XATTR_NOFOLLOW } else { 0 };
         let res = match file {
             FileId::Path(path) => unsafe {
                 libc::getxattr(
@@ -1078,6 +1080,10 @@ impl OverlayFs {
         if res < 0 {
             let err = io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::ENOATTR) {
+                return Ok(None);
+            }
+            // If filesystem doesn't support xattrs, return None
+            if err.raw_os_error() == Some(libc::ENOTSUP) {
                 return Ok(None);
             }
             return Err(err);
@@ -1113,6 +1119,15 @@ impl OverlayFs {
         mode: Option<u16>,
         rdev: Option<u32>,
     ) -> io::Result<()> {
+        // Check file type to determine if we need special handling
+        let file_type = st.st_mode & libc::S_IFMT;
+        let is_symlink = file_type == libc::S_IFLNK;
+
+        // macOS supports extended attributes on symlinks, unlike most Linux filesystems.
+        // We use XATTR_NOFOLLOW to operate on the symlink itself rather than following it.
+        // This allows us to fully virtualize symlink ownership on macOS, providing better
+        // security isolation than what's possible on Linux.
+
         // Get the current values to use as defaults
         let (uid, gid) = if let Some((uid, gid)) = owner {
             (uid, gid)
@@ -1137,14 +1152,8 @@ impl OverlayFs {
         };
         let value_bytes = value.as_bytes();
 
-        // Get options based on file type
-        let options = if (st.st_mode & libc::S_IFMT) == libc::S_IFLNK {
-            libc::XATTR_NOFOLLOW
-        } else {
-            0
-        };
-
-        // Set the xattr
+        // Set the xattr, using XATTR_NOFOLLOW for symlinks
+        let options = if is_symlink { libc::XATTR_NOFOLLOW } else { 0 };
         let res = match file {
             FileId::Path(path) => unsafe {
                 libc::setxattr(
@@ -1169,7 +1178,13 @@ impl OverlayFs {
         };
 
         if res < 0 {
-            return Err(io::Error::last_os_error());
+            let err = io::Error::last_os_error();
+            // Handle case where filesystem doesn't support xattrs
+            if err.raw_os_error() == Some(libc::ENOTSUP) {
+                debug!("Filesystem doesn't support extended attributes, continuing without virtualized ownership");
+                return Ok(());
+            }
+            return Err(err);
         }
 
         Ok(())

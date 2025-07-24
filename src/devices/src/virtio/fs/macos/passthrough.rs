@@ -47,12 +47,13 @@ static INIT_BINARY: &[u8] = include_bytes!("../../../../../../init/init");
 type Inode = u64;
 type Handle = u64;
 
-#[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Clone, Debug, Copy, PartialOrd, Ord, PartialEq, Eq)]
 struct InodeAltKey {
     ino: u64,
     dev: i32,
 }
 
+#[derive(Debug)]
 struct InodeData {
     inode: Inode,
     ino: u64,
@@ -60,11 +61,13 @@ struct InodeData {
     refcount: AtomicU64,
 }
 
+#[derive(Debug)]
 struct DirStream {
     stream: u64,
     offset: i64,
 }
 
+#[derive(Debug)]
 struct HandleData {
     inode: Inode,
     file: RwLock<File>,
@@ -98,16 +101,32 @@ fn item_to_value(item: &[u8], radix: u32) -> Option<u32> {
     }
 }
 
-fn get_xattr_stat(file: StatFile) -> io::Result<Option<(u32, u32, u32, Option<u32>)>> {
+fn get_xattr_stat(file: StatFile, st: Option<&bindings::stat64>) -> io::Result<Option<(u32, u32, u32, Option<u32>)>> {
+    // Get stat if not provided, using host=true to avoid circular dependency
+    let stat_storage;
+    let st = match st {
+        Some(s) => s,
+        None => {
+            stat_storage = match &file {
+                StatFile::Path(path) => lstat(path, true)?,
+                StatFile::Fd(fd) => fstat(*fd, true)?,
+            };
+            &stat_storage
+        }
+    };
+
+    // Check file type to determine if we need special handling
+    let file_type = st.st_mode & libc::S_IFMT;
+    let is_symlink = file_type == libc::S_IFLNK;
+
+    // macOS supports extended attributes on symlinks, unlike most Linux filesystems.
+    // We use XATTR_NOFOLLOW to operate on the symlink itself rather than following it.
+    // This allows us to fully virtualize symlink ownership on macOS.
+
     let mut buf: Vec<u8> = vec![0; 32];
+    let options = if is_symlink { libc::XATTR_NOFOLLOW } else { 0 };
     let res = match file {
         StatFile::Path(path) => unsafe {
-            let st = lstat(path, true)?;
-            let options = if (st.st_mode & libc::S_IFMT) == libc::S_IFLNK {
-                libc::XATTR_NOFOLLOW
-            } else {
-                0
-            };
             libc::getxattr(
                 path.as_ptr(),
                 XATTR_KEY.as_ptr() as *const i8,
@@ -118,12 +137,6 @@ fn get_xattr_stat(file: StatFile) -> io::Result<Option<(u32, u32, u32, Option<u3
             )
         },
         StatFile::Fd(fd) => unsafe {
-            let st = fstat(fd, true)?;
-            let options = if (st.st_mode & libc::S_IFMT) == libc::S_IFLNK {
-                libc::XATTR_NOFOLLOW
-            } else {
-                0
-            };
             libc::fgetxattr(
                 fd,
                 XATTR_KEY.as_ptr() as *const i8,
@@ -135,6 +148,10 @@ fn get_xattr_stat(file: StatFile) -> io::Result<Option<(u32, u32, u32, Option<u3
         },
     };
     if res < 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ENOATTR) || err.raw_os_error() == Some(libc::ENOTSUP) {
+            return Ok(None);
+        }
         debug!("fget_xattr error: {}", res);
         return Ok(None);
     }
@@ -187,19 +204,45 @@ fn is_valid_owner(owner: Option<(u32, u32)>) -> bool {
 
 // We won't need this once expressions like "if let ... &&" are allowed.
 #[allow(clippy::unnecessary_unwrap)]
-fn set_xattr_stat(file: StatFile, owner: Option<(u32, u32)>, mode: Option<u32>, rdev: Option<u32>) -> io::Result<()> {
+fn set_xattr_stat(
+    file: StatFile,
+    st: Option<&bindings::stat64>,
+    owner: Option<(u32, u32)>,
+    mode: Option<u32>,
+    rdev: Option<u32>,
+) -> io::Result<()> {
+    // Get stat if not provided, using host=true to avoid circular dependency
+    let stat_storage;
+    let st = match st {
+        Some(s) => s,
+        None => {
+            stat_storage = match &file {
+                StatFile::Path(path) => lstat(path, true)?,
+                StatFile::Fd(fd) => fstat(*fd, true)?,
+            };
+            &stat_storage
+        }
+    };
+
+    // Check file type and skip xattr operations for types that don't support them
+    let file_type = st.st_mode & libc::S_IFMT;
+    let is_symlink = file_type == libc::S_IFLNK;
+
+    // macOS supports extended attributes on symlinks, unlike most Linux filesystems.
+    // We use XATTR_NOFOLLOW to operate on the symlink itself rather than following it.
+    // This allows us to fully virtualize symlink ownership on macOS, providing better
+    // security isolation than what's possible on Linux.
+    // Note: While symlink permissions are always 0777 and ignored by the kernel,
+    // we still store them for consistency.
+
     let (new_owner, new_mode, orig_rdev) = if is_valid_owner(owner) && mode.is_some() {
         (owner.unwrap(), mode.unwrap(), None)
     } else {
         let (orig_owner, orig_mode, orig_rdev) =
-            if let Some((xuid, xgid, xmode, xrdev)) = get_xattr_stat(file.clone())? {
+            if let Some((xuid, xgid, xmode, xrdev)) = get_xattr_stat(file.clone(), Some(st))? {
                 ((xuid, xgid), xmode, xrdev)
             } else {
                 // Get the actual file mode from the filesystem when there's no xattr
-                let st = match &file {
-                    StatFile::Path(path) => lstat(path, false)?,
-                    StatFile::Fd(fd) => fstat(*fd, false)?,
-                };
                 ((st.st_uid, st.st_gid), st.st_mode as u32, None)
             };
 
@@ -230,14 +273,9 @@ fn set_xattr_stat(file: StatFile, owner: Option<(u32, u32)>, mode: Option<u32>, 
         format!("{}:{}:0{:o}", new_owner.0, new_owner.1, new_mode)
     };
 
+    let options = if is_symlink { libc::XATTR_NOFOLLOW } else { 0 };
     let res = match file {
         StatFile::Path(path) => unsafe {
-            let st = lstat(path, true)?;
-            let options = if (st.st_mode & libc::S_IFMT) == libc::S_IFLNK {
-                libc::XATTR_NOFOLLOW
-            } else {
-                0
-            };
             libc::setxattr(
                 path.as_ptr(),
                 XATTR_KEY.as_ptr() as *const i8,
@@ -248,12 +286,6 @@ fn set_xattr_stat(file: StatFile, owner: Option<(u32, u32)>, mode: Option<u32>, 
             )
         },
         StatFile::Fd(fd) => unsafe {
-            let st = fstat(fd, true)?;
-            let options = if (st.st_mode & libc::S_IFMT) == libc::S_IFLNK {
-                libc::XATTR_NOFOLLOW
-            } else {
-                0
-            };
             libc::fsetxattr(
                 fd,
                 XATTR_KEY.as_ptr() as *const i8,
@@ -266,7 +298,13 @@ fn set_xattr_stat(file: StatFile, owner: Option<(u32, u32)>, mode: Option<u32>, 
     };
 
     if res < 0 {
-        Err(linux_error(io::Error::last_os_error()))
+        let err = io::Error::last_os_error();
+        // Handle case where filesystem doesn't support xattrs
+        if err.raw_os_error() == Some(libc::ENOTSUP) {
+            debug!("Filesystem doesn't support extended attributes, continuing without virtualized ownership");
+            return Ok(());
+        }
+        Err(linux_error(err))
     } else {
         Ok(())
     }
@@ -283,7 +321,7 @@ fn fstat(fd: RawFd, host: bool) -> io::Result<bindings::stat64> {
         let mut st = unsafe { st.assume_init() };
 
         if !host {
-            if let Some((uid, gid, mode, rdev)) = get_xattr_stat(StatFile::Fd(fd))? {
+            if let Some((uid, gid, mode, rdev)) = get_xattr_stat(StatFile::Fd(fd), Some(&st))? {
                 st.st_uid = uid;
                 st.st_gid = gid;
                 if mode as u16 & libc::S_IFMT == 0 {
@@ -319,7 +357,7 @@ fn lstat(c_path: &CString, host: bool) -> io::Result<bindings::stat64> {
         let mut st = unsafe { st.assume_init() };
 
         if !host {
-            if let Some((uid, gid, mode, rdev)) = get_xattr_stat(StatFile::Path(c_path))? {
+            if let Some((uid, gid, mode, rdev)) = get_xattr_stat(StatFile::Path(c_path), Some(&st))? {
                 st.st_uid = uid;
                 st.st_gid = gid;
                 if mode as u16 & libc::S_IFMT == 0 {
@@ -1165,6 +1203,7 @@ impl FileSystem for PassthroughFs {
             let full_mode = (stat.st_mode as u32 & libc::S_IFMT as u32) | (mode & !umask);
             set_xattr_stat(
                 StatFile::Path(&c_path),
+                Some(&stat),
                 Some((ctx.uid, ctx.gid)),
                 Some(full_mode),
                 None,
@@ -1284,6 +1323,7 @@ impl FileSystem for PassthroughFs {
 
         if let Err(e) = set_xattr_stat(
             StatFile::Fd(fd),
+            None,
             Some((ctx.uid, ctx.gid)),
             Some(libc::S_IFREG as u32 | (mode & !(umask & 0o777))),
             None,
@@ -1440,28 +1480,30 @@ impl FileSystem for PassthroughFs {
 
         if valid.contains(SetattrValid::MODE) {
             // Get current stat to preserve file type bits and check if it's a device node
-            let (current_file_type, current_rdev) = match data {
+            let (st, current_file_type, current_rdev) = match data {
                 Data::Handle(fd) => {
                     let st = fstat(fd, false)?;
                     let file_type = st.st_mode as u32 & libc::S_IFMT as u32;
-                    let rdev = if (st.st_mode & libc::S_IFMT) == libc::S_IFBLK ||
-                                  (st.st_mode & libc::S_IFMT) == libc::S_IFCHR {
+                    let rdev = if (st.st_mode & libc::S_IFMT) == libc::S_IFBLK
+                        || (st.st_mode & libc::S_IFMT) == libc::S_IFCHR
+                    {
                         Some(st.st_rdev as u32)
                     } else {
                         None
                     };
-                    (file_type, rdev)
+                    (st, file_type, rdev)
                 }
                 Data::FilePath => {
                     let st = lstat(&c_path, false)?;
                     let file_type = st.st_mode as u32 & libc::S_IFMT as u32;
-                    let rdev = if (st.st_mode & libc::S_IFMT) == libc::S_IFBLK ||
-                                  (st.st_mode & libc::S_IFMT) == libc::S_IFCHR {
+                    let rdev = if (st.st_mode & libc::S_IFMT) == libc::S_IFBLK
+                        || (st.st_mode & libc::S_IFMT) == libc::S_IFCHR
+                    {
                         Some(st.st_rdev as u32)
                     } else {
                         None
                     };
-                    (file_type, rdev)
+                    (st, file_type, rdev)
                 }
             };
 
@@ -1470,10 +1512,10 @@ impl FileSystem for PassthroughFs {
 
             match data {
                 Data::Handle(fd) => {
-                    set_xattr_stat(StatFile::Fd(fd), None, Some(full_mode), current_rdev)?
+                    set_xattr_stat(StatFile::Fd(fd), Some(&st), None, Some(full_mode), current_rdev)?
                 }
                 Data::FilePath => {
-                    set_xattr_stat(StatFile::Path(&c_path), None, Some(full_mode), current_rdev)?
+                    set_xattr_stat(StatFile::Path(&c_path), Some(&st), None, Some(full_mode), current_rdev)?
                 }
             }
         }
@@ -1492,7 +1534,9 @@ impl FileSystem for PassthroughFs {
                 u32::MAX
             };
 
-            set_xattr_stat(StatFile::Path(&c_path), Some((uid, gid)), None, None)?;
+            // Get stat for the file
+            let st = lstat(&c_path, false)?;
+            set_xattr_stat(StatFile::Path(&c_path), Some(&st), Some((uid, gid)), None, None)?;
         }
 
         if valid.contains(SetattrValid::SIZE) {
@@ -1594,9 +1638,13 @@ impl FileSystem for PassthroughFs {
                     )
                 };
                 if fd > 0 {
-                    if let Err(e) =
-                        set_xattr_stat(StatFile::Fd(fd), None, Some((libc::S_IFCHR | 0o600) as u32), Some(0))
-                    {
+                    if let Err(e) = set_xattr_stat(
+                        StatFile::Fd(fd),
+                        None,
+                        None,
+                        Some((libc::S_IFCHR | 0o600) as u32),
+                        Some(0),
+                    ) {
                         unsafe { libc::close(fd) };
                         return Err(e);
                     }
@@ -1643,8 +1691,9 @@ impl FileSystem for PassthroughFs {
             };
 
             // For device nodes, include rdev
-            let device_rdev = if (mode & libc::S_IFMT as u32) == libc::S_IFBLK as u32 ||
-                                 (mode & libc::S_IFMT as u32) == libc::S_IFCHR as u32 {
+            let device_rdev = if (mode & libc::S_IFMT as u32) == libc::S_IFBLK as u32
+                || (mode & libc::S_IFMT as u32) == libc::S_IFCHR as u32
+            {
                 Some(rdev)
             } else {
                 None
@@ -1654,6 +1703,7 @@ impl FileSystem for PassthroughFs {
             let full_mode = (mode & libc::S_IFMT as u32) | ((mode & !umask) & 0o777);
             if let Err(e) = set_xattr_stat(
                 StatFile::Fd(fd),
+                None,
                 Some((ctx.uid, ctx.gid)),
                 Some(full_mode),
                 device_rdev,
@@ -1712,6 +1762,7 @@ impl FileSystem for PassthroughFs {
             let mode = libc::S_IFLNK | 0o777;
             set_xattr_stat(
                 StatFile::Path(&c_path),
+                None,
                 Some((ctx.uid, ctx.gid)),
                 Some(mode as u32),
                 None,

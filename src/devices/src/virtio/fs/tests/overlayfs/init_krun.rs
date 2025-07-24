@@ -2,7 +2,8 @@ use std::{ffi::CString, io};
 
 use crate::virtio::{
     fs::filesystem::{Context, FileSystem},
-    fuse::FsOptions, overlayfs::OverlayFs,
+    fuse::FsOptions,
+    overlayfs::OverlayFs,
 };
 
 use super::helper;
@@ -75,7 +76,7 @@ fn test_init_krun_open_and_read() -> io::Result<()> {
         expected_size as u32,
         0,
         None,
-        0
+        0,
     )?;
 
     assert_eq!(bytes_read, expected_size);
@@ -84,7 +85,11 @@ fn test_init_krun_open_and_read() -> io::Result<()> {
     // Verify the content starts with ELF magic number (for Linux init binary)
     assert!(buffer.0.len() >= 4);
     let elf_magic = &[0x7f, b'E', b'L', b'F'];
-    assert_eq!(&buffer.0[..4], elf_magic, "init.krun should be an ELF binary");
+    assert_eq!(
+        &buffer.0[..4],
+        elf_magic,
+        "init.krun should be an ELF binary"
+    );
 
     Ok(())
 }
@@ -93,9 +98,7 @@ fn test_init_krun_open_and_read() -> io::Result<()> {
 #[cfg(not(feature = "efi"))]
 fn test_init_krun_partial_read() -> io::Result<()> {
     // Create test layers
-    let layers = vec![
-        vec![],
-    ];
+    let layers = vec![vec![]];
 
     let (fs, temp_dirs) = helper::create_overlayfs(layers)?;
     helper::debug_print_layers(&temp_dirs, false)?;
@@ -121,7 +124,7 @@ fn test_init_krun_partial_read() -> io::Result<()> {
         50,
         100,
         None,
-        0
+        0,
     )?;
 
     assert_eq!(bytes_read, 50);
@@ -140,7 +143,7 @@ fn test_init_krun_partial_read() -> io::Result<()> {
             50,
             150, // Read from offset 150
             None,
-            0
+            0,
         )?;
 
         assert_eq!(bytes_read2, 50);
@@ -155,7 +158,7 @@ fn test_init_krun_partial_read() -> io::Result<()> {
 fn test_init_krun_with_whiteout() -> io::Result<()> {
     // Create test layers with a whiteout for init.krun
     let layers = vec![
-        vec![], // Lower layer - empty
+        vec![],                                // Lower layer - empty
         vec![(".wh.init.krun", false, 0o644)], // Upper layer with whiteout
     ];
 
@@ -181,13 +184,8 @@ fn test_init_krun_with_whiteout() -> io::Result<()> {
 fn test_init_krun_not_in_subdirectory() -> io::Result<()> {
     // Create test layers with subdirectories
     let layers = vec![
-        vec![
-            ("dir1", true, 0o755),
-            ("dir1/file1", false, 0o644),
-        ],
-        vec![
-            ("dir2", true, 0o755),
-        ],
+        vec![("dir1", true, 0o755), ("dir1/file1", false, 0o644)],
+        vec![("dir2", true, 0o755)],
     ];
 
     let (fs, temp_dirs) = helper::create_overlayfs(layers)?;
@@ -218,7 +216,6 @@ fn test_init_krun_not_in_subdirectory() -> io::Result<()> {
 
     Ok(())
 }
-
 
 #[test]
 #[cfg(not(feature = "efi"))]
@@ -345,20 +342,34 @@ fn test_init_krun_getattr() -> io::Result<()> {
 
     // Verify the attributes match what we expect
     assert_eq!(attr.st_ino, init_inode);
-    assert_eq!(attr.st_mode & libc::S_IFMT, libc::S_IFREG, "Should be a regular file");
-    assert_eq!(attr.st_mode & 0o777, 0o755, "Should have executable permissions");
+    assert_eq!(
+        attr.st_mode & libc::S_IFMT,
+        libc::S_IFREG,
+        "Should be a regular file"
+    );
+    assert_eq!(
+        attr.st_mode & 0o777,
+        0o755,
+        "Should have executable permissions"
+    );
     assert_eq!(attr.st_nlink, 1, "Should have one link");
     assert_eq!(attr.st_uid, 0, "Should be owned by root");
     assert_eq!(attr.st_gid, 0, "Should be in root group");
     assert_eq!(attr.st_blksize, 4096, "Block size should be 4096");
-    
+
     // Verify size matches the embedded binary
     let expected_size = fs.get_init_binary_size();
-    assert_eq!(attr.st_size, expected_size as i64, "Size should match the embedded binary");
-    
+    assert_eq!(
+        attr.st_size, expected_size as i64,
+        "Size should match the embedded binary"
+    );
+
     // Verify blocks calculation (rounded up to 512-byte blocks)
     let expected_blocks = (expected_size as i64 + 511) / 512;
-    assert_eq!(attr.st_blocks, expected_blocks, "Blocks should be correctly calculated");
+    assert_eq!(
+        attr.st_blocks, expected_blocks,
+        "Blocks should be correctly calculated"
+    );
 
     // Verify timeout is set correctly
     assert!(timeout.as_secs() > 0, "Timeout should be positive");
@@ -369,7 +380,10 @@ fn test_init_krun_getattr() -> io::Result<()> {
     let (regular_attr, _) = fs.getattr(Context::default(), regular_entry.inode, None)?;
 
     // Verify the inodes are different
-    assert_ne!(attr.st_ino, regular_attr.st_ino, "init.krun should have a different inode than regular files");
+    assert_ne!(
+        attr.st_ino, regular_attr.st_ino,
+        "init.krun should have a different inode than regular files"
+    );
 
     Ok(())
 }

@@ -226,21 +226,34 @@ fn test_setattr_symlink() -> io::Result<()> {
     let link_name = CString::new("link").unwrap();
     let link_entry = fs.lookup(Context { uid: 1000, gid: 1000, pid: 1234 }, 1, &link_name)?;
 
-    // Symlinks typically have mode 0777, but we'll try to set override
+    // Try to change ownership on symlink
     let mut attr = link_entry.attr;
     attr.st_uid = 4000;
     attr.st_gid = 4000;
     let valid = SetattrValid::UID | SetattrValid::GID;
-    let (new_attr, _) = fs.setattr(Context { uid: 1000, gid: 1000, pid: 1234 }, link_entry.inode, attr, None, valid)?;
+    
+    // On Linux, this should fail with EOPNOTSUPP because we can't virtualize symlink ownership
+    #[cfg(target_os = "linux")]
+    {
+        let result = fs.setattr(Context { uid: 1000, gid: 1000, pid: 1234 }, link_entry.inode, attr, None, valid);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EOPNOTSUPP));
+        println!("Linux correctly rejects symlink ownership changes");
+    }
+    
+    // On macOS, this should succeed because macOS supports xattr on symlinks
+    #[cfg(target_os = "macos")]
+    {
+        let (new_attr, _) = fs.setattr(Context { uid: 1000, gid: 1000, pid: 1234 }, link_entry.inode, attr, None, valid)?;
+        
+        // Verify the virtualized uid/gid
+        assert_eq!(new_attr.st_uid, 4000);
+        assert_eq!(new_attr.st_gid, 4000);
 
-    // Verify the virtualized uid/gid
-    assert_eq!(new_attr.st_uid, 4000);
-    assert_eq!(new_attr.st_gid, 4000);
-
-    // Verify xattr was set on the symlink itself (not the target)
-    let xattr_value = helper::get_xattr(&link_path, "user.containers.override_stat")?;
-    if xattr_value.is_some() {
-        // Some filesystems support xattrs on symlinks
+        // Verify xattr was set on the symlink itself (not the target)
+        let xattr_value = helper::get_xattr(&link_path, "user.containers.override_stat")?;
+        assert!(xattr_value.is_some(), "macOS should support xattr on symlinks");
+        
         let xattr_str = xattr_value.unwrap();
         let parts: Vec<&str> = xattr_str.split(':').collect();
         assert_eq!(parts.len(), 3);
@@ -249,9 +262,6 @@ fn test_setattr_symlink() -> io::Result<()> {
         // Verify the mode includes symlink file type
         let mode = u32::from_str_radix(parts[2], 8).unwrap();
         assert_eq!(mode & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFLNK)); // Should be a symlink
-    } else {
-        // Filesystem doesn't support xattrs on symlinks, which is fine
-        println!("Filesystem doesn't support xattrs on symlinks");
     }
 
     Ok(())
