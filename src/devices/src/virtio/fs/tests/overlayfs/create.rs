@@ -821,7 +821,7 @@ fn test_symlink_nested() -> io::Result<()> {
         // On macOS, verify regular symlinks
         for (dir, link) in &[("dir1", "link_to_file1"), ("dir2", "link_to_file2"), ("dir3", "link_to_top_file")] {
             let link_path = top_layer.join(dir).join(link);
-            assert!(link_path.exists(), "{}/{} should exist", dir, link);
+            assert!(link_path.symlink_metadata().is_ok(), "{}/{} should exist", dir, link);
             
             let metadata = fs::symlink_metadata(&link_path)?;
             assert!(metadata.file_type().is_symlink(), 
@@ -999,7 +999,9 @@ fn test_symlink_multiple_layers() -> io::Result<()> {
     {
         for (link, target, description) in &test_cases {
             let link_path = top_layer.join(link);
-            assert!(link_path.exists(), 
+            // Use symlink_metadata to check if the symlink itself exists
+            // (not whether its target exists)
+            assert!(link_path.symlink_metadata().is_ok(), 
                 "{}: Symlink should exist in top layer", description);
             
             // Verify it's a regular symlink
@@ -1037,7 +1039,7 @@ fn test_symlink_multiple_layers() -> io::Result<()> {
     
     // Verify the symlink was created in the top layer's shared_dir
     let shared_link_path = top_layer.join("shared_dir/shared_link");
-    assert!(shared_link_path.exists(),
+    assert!(shared_link_path.symlink_metadata().is_ok(),
         "Symlink in shared directory should exist in top layer");
     
     let shared_target_read = fs.readlink(ctx, shared_link_entry.inode)?;

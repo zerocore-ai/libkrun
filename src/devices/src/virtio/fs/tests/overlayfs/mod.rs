@@ -244,6 +244,10 @@ mod helper {
         let key_cstr = CString::new(key)?;
 
         let mut buf = vec![0u8; 256];
+        
+        // Check if path is a symlink to determine if we need XATTR_NOFOLLOW
+        let metadata = fs::symlink_metadata(path)?;
+        let is_symlink = metadata.file_type().is_symlink();
 
         #[cfg(target_os = "macos")]
         let res = unsafe {
@@ -253,7 +257,7 @@ mod helper {
                 buf.as_mut_ptr() as *mut libc::c_void,
                 buf.len(),
                 0,
-                0,
+                if is_symlink { libc::XATTR_NOFOLLOW } else { 0 },
             )
         };
 
