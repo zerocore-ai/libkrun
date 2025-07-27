@@ -812,12 +812,10 @@ impl OverlayFs {
         mode: Option<u32>,
         rdev: Option<u64>,
     ) -> io::Result<()> {
-        // Check file type and skip xattr operations for types that don't support them
+        // Step 1: Check if this is a real symlink - we can't set xattr on those
         let file_type = st.st_mode & libc::S_IFMT;
-        let is_symlink = file_type == libc::S_IFLNK;
-
-        // Handle symlinks specially
-        if is_symlink {
+        if file_type == libc::S_IFLNK {
+            // Real symlink - Linux doesn't support xattr on symlinks
             // WARNING: While Linux allows changing symlink ownership via lchown(), we cannot
             // virtualize this because most filesystems don't support extended attributes on
             // symlinks. Symlink ownership matters for security:
@@ -834,14 +832,25 @@ impl OverlayFs {
             return Ok(());
         }
 
-        // Get the current values to use as defaults
+        // Step 2: For all other files (including file-backed symlinks), get the current values
         let (uid, gid) = if let Some((uid, gid)) = owner {
             (uid, gid)
         } else {
             (st.st_uid, st.st_gid)
         };
 
-        let mode = mode.unwrap_or(st.st_mode);
+        // Step 3: Determine the mode to use
+        let mode = if let Some(m) = mode {
+            m  // Use provided mode
+        } else {
+            // No mode provided - preserve existing virtualized mode if it exists
+            // This is crucial for file-backed symlinks to preserve their S_IFLNK type
+            if let Ok(Some((_, _, existing_mode, _))) = self.get_override_xattr(fd, st) {
+                existing_mode  // Preserve virtualized mode
+            } else {
+                st.st_mode  // Fall back to actual file mode
+            }
+        };
 
         // Format the xattr value - include full mode with file type bits for special files
         // that we store as regular files (FIFOs, sockets, device nodes)
@@ -2541,7 +2550,7 @@ impl OverlayFs {
 
     fn do_symlink(
         &self,
-        _ctx: Context,
+        ctx: Context,
         linkname: &CStr,
         parent: Inode,
         name: &CStr,
@@ -2572,48 +2581,136 @@ impl OverlayFs {
         // Get the parent file descriptor
         let parent_fd = parent_data.file.as_raw_fd();
 
-        // Create the node device
-        let res = unsafe { libc::symlinkat(linkname.as_ptr(), parent_fd, name.as_ptr()) };
-
-        if res == 0 {
-            let file = self.open_file_at(parent_fd, name, libc::O_PATH)?.0;
-
-            // NOTE: On Linux, we cannot virtualize symlink ownership because most filesystems
-            // don't support extended attributes on symlinks. The symlink will have the
-            // ownership of the process that created it. This is a known limitation.
-            // We don't call set_override_xattr here because it would return EOPNOTSUPP.
-
-            // Get stat (without virtualized ownership)
-            let (updated_stat, mnt_id) = Self::unpatched_statx(file.as_raw_fd(), None)?;
-
-            let mut path = parent_data.path.clone();
-            path.push(self.intern_name(name)?);
-
-            // Create the inode for the newly created directory
-            let (inode, _) = self.create_inode(
-                file,
-                updated_stat.st_ino,
-                updated_stat.st_dev,
-                mnt_id,
-                path,
-                parent_data.layer_idx,
-            );
-
-            // Create the entry for the newly created directory
-            let entry = self.create_entry(inode, updated_stat);
-
-            return Ok(entry);
+        // NOTE: We create symlinks as regular files on Linux to support setting
+        // xattr on them. Most filesystems don't support extended attributes on symlinks.
+        // The link target is stored as file content and the actual file type (S_IFLNK)
+        // is stored in the override xattr.
+        
+        // First check link target length
+        let linkname_bytes = linkname.to_bytes();
+        if linkname_bytes.len() > libc::PATH_MAX as usize {
+            return Err(io::Error::from_raw_os_error(libc::ENAMETOOLONG));
         }
 
-        // Return the error
-        Err(io::Error::last_os_error())
+        // Create a regular file to back the symlink
+        let fd = unsafe {
+            libc::openat(
+                parent_fd,
+                name.as_ptr(),
+                libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        // Write the link target as file content
+        let res = unsafe {
+            libc::write(
+                fd,
+                linkname_bytes.as_ptr() as *const libc::c_void,
+                linkname_bytes.len(),
+            )
+        };
+
+        if res < 0 || res as usize != linkname_bytes.len() {
+            unsafe { libc::close(fd) };
+            // Clean up the file on error
+            unsafe { libc::unlinkat(parent_fd, name.as_ptr(), 0) };
+            return Err(io::Error::last_os_error());
+        }
+
+        // Get initial stat.
+        let (stat, _) = Self::unpatched_statx(fd, None)?;
+
+        // Set ownership and permissions with S_IFLNK mode
+        self.set_override_xattr(
+            fd,
+            &stat,
+            Some((ctx.uid, ctx.gid)),
+            Some(libc::S_IFLNK | 0o777),
+            None,
+        )?;
+
+        // Close the fd
+        unsafe { libc::close(fd) };
+
+        // Re-open with O_PATH for inode management
+        let file = self.open_file_at(parent_fd, name, libc::O_PATH)?.0;
+
+        // Get updated stat with override applied
+        let (updated_stat, mnt_id) = self.patched_statx(file.as_raw_fd(), None)?;
+
+        let mut path = parent_data.path.clone();
+        path.push(self.intern_name(name)?);
+
+        // Create the inode for the newly created symlink
+        let (inode, _) = self.create_inode(
+            file,
+            updated_stat.st_ino,
+            updated_stat.st_dev,
+            mnt_id,
+            path,
+            parent_data.layer_idx,
+        );
+
+        // Create the entry for the newly created symlink
+        let entry = self.create_entry(inode, updated_stat);
+
+        Ok(entry)
     }
 
     fn do_readlink(&self, inode: Inode) -> io::Result<Vec<u8>> {
         // Get the path for this inode
         let inode_data = self.get_inode_data(inode)?;
 
-        // Allocate a buffer for the link target
+        // First check if this is a file-backed symlink by reading override xattr
+        let (stat, _) = Self::unpatched_statx(inode_data.file.as_raw_fd(), None)?;
+        
+        // Check if we have override xattr
+        if let Ok(Some((_, _, mode, _))) = self.get_override_xattr(inode_data.file.as_raw_fd(), &stat) {
+            // Check if the override mode indicates this is a symlink
+            if (mode & libc::S_IFMT) == libc::S_IFLNK {
+                // This is a file-backed symlink, read the file content
+                let mut buf = vec![0; libc::PATH_MAX as usize];
+                
+                // Since the file is opened with O_PATH, we need to open it through /proc/self/fd
+                let proc_path = format!("{}\0", inode_data.file.as_raw_fd());
+                let fd = unsafe {
+                    libc::openat(
+                        self.proc_self_fd.as_raw_fd(),
+                        proc_path.as_ptr() as *const libc::c_char,
+                        libc::O_RDONLY | libc::O_CLOEXEC,
+                    )
+                };
+                
+                if fd < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                
+                // Read the link target from file content
+                let res = unsafe {
+                    libc::read(
+                        fd,
+                        buf.as_mut_ptr() as *mut libc::c_void,
+                        buf.len(),
+                    )
+                };
+                
+                unsafe { libc::close(fd) };
+                
+                if res < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                
+                buf.resize(res as usize, 0);
+                return Ok(buf);
+            }
+        }
+
+        // Fall back to regular readlinkat for real symlinks
         let mut buf = vec![0; libc::PATH_MAX as usize];
 
         // Safe because this will only modify the contents of `buf` and we check the return value.

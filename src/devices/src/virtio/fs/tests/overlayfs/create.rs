@@ -610,8 +610,15 @@ fn test_mkdir_multiple_layers() -> io::Result<()> {
 
 #[test]
 fn test_symlink_basic() -> io::Result<()> {
-    // Create test layers:
-    // Single layer with a file
+    // Test basic symlink creation in overlayfs
+    // This test verifies:
+    // 1. Creating a symlink through the filesystem API
+    // 2. The symlink has correct mode and permissions
+    // 3. The symlink can be looked up correctly
+    // 4. The physical representation on disk matches the platform behavior
+    // 5. The symlink target can be read correctly through the filesystem API
+    
+    // Create test layers with a single file that will be the symlink target
     let layers = vec![vec![("target_file", false, 0o644)]];
 
     let (fs, temp_dirs) = helper::create_overlayfs(layers)?;
@@ -620,46 +627,102 @@ fn test_symlink_basic() -> io::Result<()> {
     // Initialize filesystem
     fs.init(FsOptions::empty())?;
 
-    // Create a new symlink
+    // Create a new symlink pointing to target_file
     let link_name = CString::new("link").unwrap();
     let target_name = CString::new("target_file").unwrap();
     let ctx = Context::default();
     let entry = fs.symlink(ctx, &target_name, 1, &link_name, Extensions::default())?;
 
-    // Verify the symlink was created with correct mode
-    assert_eq!(entry.attr.st_mode & libc::S_IFMT, libc::S_IFLNK);
-    assert_eq!(entry.attr.st_mode & 0o777, 0o777); // Symlinks are typically 0777
+    // Verify the symlink was created with correct mode through the filesystem API
+    assert_eq!(entry.attr.st_mode & libc::S_IFMT, libc::S_IFLNK, 
+        "Created entry should have S_IFLNK file type");
+    assert_eq!(entry.attr.st_mode & 0o777, 0o777, 
+        "Symlinks should have 0777 permissions");
 
-    // Verify we can look it up
+    // Verify we can look it up and it still appears as a symlink
     let lookup_entry = fs.lookup(ctx, 1, &link_name)?;
-    assert_eq!(lookup_entry.attr.st_mode & libc::S_IFMT, libc::S_IFLNK);
+    assert_eq!(lookup_entry.attr.st_mode & libc::S_IFMT, libc::S_IFLNK,
+        "Looked up entry should have S_IFLNK file type");
+    assert_eq!(lookup_entry.inode, entry.inode, 
+        "Lookup should return same inode as creation");
 
-    // Verify the symlink exists on disk in the top layer
+    // Verify the physical representation on disk
     let link_path = temp_dirs.last().unwrap().path().join("link");
-    assert!(link_path.exists());
-    assert!(link_path.is_symlink());
+    assert!(link_path.exists(), "Symlink should exist on disk");
+    
+    // Platform-specific verification of physical representation
+    #[cfg(target_os = "linux")]
+    {
+        // On Linux, symlinks are implemented as regular files with xattr metadata
+        // This is done to support extended attributes on filesystems that don't
+        // support xattrs on symlinks
+        let metadata = fs::metadata(&link_path)?;
+        assert!(metadata.is_file(), 
+            "On Linux, symlinks should be represented as regular files");
+        
+        // Verify the override xattr is set correctly
+        let xattr_value = helper::get_xattr(&link_path, "user.containers.override_stat")?;
+        assert!(xattr_value.is_some(), 
+            "File-backed symlink should have override_stat xattr");
+        
+        if let Some(xattr_str) = xattr_value {
+            let parts: Vec<&str> = xattr_str.split(':').collect();
+            assert!(parts.len() >= 3, "xattr should have at least uid:gid:mode");
+            
+            // Verify the mode in xattr indicates this is a symlink
+            let mode = u32::from_str_radix(parts[2], 8).expect("mode should be valid octal");
+            assert_eq!(mode & libc::S_IFMT, libc::S_IFLNK,
+                "xattr mode should indicate S_IFLNK file type");
+        }
+        
+        // Verify the file content contains the link target
+        let file_content = fs::read(&link_path)?;
+        assert_eq!(file_content, target_name.to_bytes(),
+            "File content should contain the symlink target");
+    }
+    
+    #[cfg(target_os = "macos")]
+    {
+        // On macOS, symlinks are regular symlinks
+        let metadata = fs::symlink_metadata(&link_path)?;
+        assert!(metadata.file_type().is_symlink(),
+            "On macOS, symlinks should be regular symlinks");
+        
+        // Verify the symlink target through filesystem
+        let target = fs::read_link(&link_path)?;
+        assert_eq!(target.to_str().unwrap(), "target_file",
+            "Symlink should point to correct target");
+    }
 
-    // Verify the symlink points to the correct target
+    // Verify the symlink target can be read through the filesystem API
     let target = fs.readlink(ctx, lookup_entry.inode)?;
-    assert_eq!(target, target_name.to_bytes());
+    assert_eq!(target, target_name.to_bytes(),
+        "readlink should return the correct target");
+
+    // Additional verification: ensure the symlink behaves correctly
+    // Try to lookup the target through the symlink (should fail since we're not following)
+    match fs.lookup(ctx, lookup_entry.inode, &CString::new("anything").unwrap()) {
+        Err(e) => assert_eq!(e.raw_os_error(), Some(libc::ENOTDIR),
+            "Looking up through a symlink should fail with ENOTDIR"),
+        Ok(_) => panic!("Lookup through symlink should fail"),
+    }
 
     Ok(())
 }
 
 #[test]
 fn test_symlink_nested() -> io::Result<()> {
+    // Test symlink creation in nested directory structures across multiple layers
+    // This test verifies:
+    // 1. Creating symlinks in directories from different layers
+    // 2. Copy-up behavior when creating symlinks in lower layer directories
+    // 3. Symlinks work correctly in nested directory structures
+    // 4. Each symlink can be read correctly regardless of which layer its parent came from
+    
     // Create test layers with complex structure:
-    // Layer 0 (bottom):
-    //   - dir1/
-    //   - dir1/file1
-    //   - dir1/subdir/
-    //   - dir1/subdir/bottom_file
-    // Layer 1 (middle):
-    //   - dir2/
-    //   - dir2/file2
-    // Layer 2 (top):
-    //   - dir3/
-    //   - dir3/top_file
+    // Layer 0 (bottom): dir1 with files and subdirectories
+    // Layer 1 (middle): dir2 with a file
+    // Layer 2 (top): dir3 with a file
     let layers = vec![
         vec![
             ("dir1", true, 0o755),
@@ -679,9 +742,13 @@ fn test_symlink_nested() -> io::Result<()> {
 
     let ctx = Context::default();
 
-    // Test 1: Create symlink in dir1 (should trigger copy-up)
+    // Test 1: Create symlink in dir1 (from bottom layer - should trigger copy-up)
     let dir1_name = CString::new("dir1").unwrap();
     let dir1_entry = fs.lookup(ctx, 1, &dir1_name)?;
+    
+    // Verify dir1 is from bottom layer initially
+    assert_eq!(dir1_entry.attr.st_mode & libc::S_IFMT, libc::S_IFDIR);
+    
     let link_name = CString::new("link_to_file1").unwrap();
     let target_name = CString::new("file1").unwrap();
     let link_entry = fs.symlink(
@@ -693,7 +760,11 @@ fn test_symlink_nested() -> io::Result<()> {
     )?;
     assert_eq!(link_entry.attr.st_mode & libc::S_IFMT, libc::S_IFLNK);
 
-    // Test 2: Create symlink in dir2 (middle layer, should trigger copy-up)
+    // Verify dir1 was copied up to top layer
+    assert!(temp_dirs.last().unwrap().path().join("dir1").exists(),
+        "dir1 should be copied up to top layer");
+
+    // Test 2: Create symlink in dir2 (middle layer - should trigger copy-up)
     let dir2_name = CString::new("dir2").unwrap();
     let dir2_entry = fs.lookup(ctx, 1, &dir2_name)?;
     let middle_link_name = CString::new("link_to_file2").unwrap();
@@ -707,7 +778,11 @@ fn test_symlink_nested() -> io::Result<()> {
     )?;
     assert_eq!(middle_link_entry.attr.st_mode & libc::S_IFMT, libc::S_IFLNK);
 
-    // Test 3: Create symlink in dir3 (top layer, no copy-up needed)
+    // Verify dir2 was copied up to top layer
+    assert!(temp_dirs.last().unwrap().path().join("dir2").exists(),
+        "dir2 should be copied up to top layer");
+
+    // Test 3: Create symlink in dir3 (already in top layer - no copy-up needed)
     let dir3_name = CString::new("dir3").unwrap();
     let dir3_entry = fs.lookup(ctx, 1, &dir3_name)?;
     let top_link_name = CString::new("link_to_top_file").unwrap();
@@ -721,21 +796,83 @@ fn test_symlink_nested() -> io::Result<()> {
     )?;
     assert_eq!(top_link_entry.attr.st_mode & libc::S_IFMT, libc::S_IFLNK);
 
-    // Verify all symlinks exist in appropriate layers
+    // Verify all symlinks exist in the top layer (due to copy-up)
     let top_layer = temp_dirs.last().unwrap().path();
-    assert!(fs::symlink_metadata(top_layer.join("dir1/link_to_file1")).is_ok());
-    assert!(fs::symlink_metadata(top_layer.join("dir2/link_to_file2")).is_ok());
-    assert!(fs::symlink_metadata(top_layer.join("dir3/link_to_top_file")).is_ok());
+    
+    #[cfg(target_os = "linux")]
+    {
+        // On Linux, verify file-backed symlinks
+        for (dir, link) in &[("dir1", "link_to_file1"), ("dir2", "link_to_file2"), ("dir3", "link_to_top_file")] {
+            let link_path = top_layer.join(dir).join(link);
+            assert!(link_path.exists(), "{}/{} should exist", dir, link);
+            
+            let metadata = fs::metadata(&link_path)?;
+            assert!(metadata.is_file(), 
+                "{}/{} should be a regular file on Linux", dir, link);
+            
+            // Verify xattr
+            let xattr = helper::get_xattr(&link_path, "user.containers.override_stat")?;
+            assert!(xattr.is_some(), "{}/{} should have override_stat xattr", dir, link);
+        }
+    }
+    
+    #[cfg(target_os = "macos")]
+    {
+        // On macOS, verify regular symlinks
+        for (dir, link) in &[("dir1", "link_to_file1"), ("dir2", "link_to_file2"), ("dir3", "link_to_top_file")] {
+            let link_path = top_layer.join(dir).join(link);
+            assert!(link_path.exists(), "{}/{} should exist", dir, link);
+            
+            let metadata = fs::symlink_metadata(&link_path)?;
+            assert!(metadata.file_type().is_symlink(), 
+                "{}/{} should be a symlink on macOS", dir, link);
+        }
+    }
 
-    // Verify symlink targets
+    // Verify symlink targets through filesystem API
     let link1_target = fs.readlink(ctx, link_entry.inode)?;
-    assert_eq!(link1_target, target_name.to_bytes());
+    assert_eq!(link1_target, target_name.to_bytes(),
+        "First symlink should point to file1");
 
     let link2_target = fs.readlink(ctx, middle_link_entry.inode)?;
-    assert_eq!(link2_target, middle_target.to_bytes());
+    assert_eq!(link2_target, middle_target.to_bytes(),
+        "Second symlink should point to file2");
 
     let link3_target = fs.readlink(ctx, top_link_entry.inode)?;
-    assert_eq!(link3_target, top_target.to_bytes());
+    assert_eq!(link3_target, top_target.to_bytes(),
+        "Third symlink should point to top_file");
+
+    // Additional test: Create symlink with absolute path
+    let abs_link_name = CString::new("abs_link").unwrap();
+    let abs_target = CString::new("/absolute/path/to/target").unwrap();
+    let abs_link_entry = fs.symlink(
+        ctx,
+        &abs_target,
+        dir1_entry.inode,
+        &abs_link_name,
+        Extensions::default(),
+    )?;
+    
+    let abs_target_read = fs.readlink(ctx, abs_link_entry.inode)?;
+    assert_eq!(abs_target_read, abs_target.to_bytes(),
+        "Absolute path symlinks should be preserved");
+
+    // Test symlink in subdirectory
+    let subdir_name = CString::new("subdir").unwrap();
+    let subdir_entry = fs.lookup(ctx, dir1_entry.inode, &subdir_name)?;
+    let subdir_link_name = CString::new("link_to_bottom").unwrap();
+    let subdir_target = CString::new("bottom_file").unwrap();
+    let subdir_link_entry = fs.symlink(
+        ctx,
+        &subdir_target,
+        subdir_entry.inode,
+        &subdir_link_name,
+        Extensions::default(),
+    )?;
+    
+    let subdir_target_read = fs.readlink(ctx, subdir_link_entry.inode)?;
+    assert_eq!(subdir_target_read, subdir_target.to_bytes(),
+        "Symlinks in subdirectories should work correctly");
 
     Ok(())
 }
@@ -769,20 +906,33 @@ fn test_symlink_existing_name() -> io::Result<()> {
 
 #[test]
 fn test_symlink_multiple_layers() -> io::Result<()> {
-    // Create test layers:
-    // Layer 0 (bottom): base files
-    // Layer 1 (middle): some files
-    // Layer 2 (top): more files
+    // Test creating symlinks that point to targets in different layers
+    // This test verifies:
+    // 1. Symlinks can point to targets in any layer
+    // 2. Symlinks are always created in the top layer
+    // 3. Both relative and cross-directory symlinks work correctly
+    // 4. The physical representation matches platform expectations
+    
+    // Create test layers with directories and files in each layer
     let layers = vec![
         vec![
             ("bottom_dir", true, 0o755),
             ("bottom_dir/target1", false, 0o644),
+            ("shared_dir", true, 0o755),
+            ("shared_dir/bottom_file", false, 0o644),
         ],
         vec![
             ("middle_dir", true, 0o755),
             ("middle_dir/target2", false, 0o644),
+            ("shared_dir", true, 0o755),
+            ("shared_dir/middle_file", false, 0o644),
         ],
-        vec![("top_dir", true, 0o755), ("top_dir/target3", false, 0o644)],
+        vec![
+            ("top_dir", true, 0o755), 
+            ("top_dir/target3", false, 0o644),
+            ("shared_dir", true, 0o755),
+            ("shared_dir/top_file", false, 0o644),
+        ],
     ];
 
     let (fs, temp_dirs) = helper::create_overlayfs(layers)?;
@@ -793,29 +943,114 @@ fn test_symlink_multiple_layers() -> io::Result<()> {
 
     let ctx = Context::default();
 
-    // Create symlinks to files in different layers
+    // Test 1: Create symlinks to files in different layers
     let test_cases = vec![
-        ("link_to_bottom", "bottom_dir/target1"),
-        ("link_to_middle", "middle_dir/target2"),
-        ("link_to_top", "top_dir/target3"),
+        ("link_to_bottom", "bottom_dir/target1", "Points to file in bottom layer"),
+        ("link_to_middle", "middle_dir/target2", "Points to file in middle layer"),
+        ("link_to_top", "top_dir/target3", "Points to file in top layer"),
+        ("link_relative", "../bottom_dir/target1", "Relative path symlink"),
+        ("link_dot_relative", "./top_dir/target3", "Dot-relative path symlink"),
     ];
 
-    for (link, target) in test_cases.clone() {
-        let link_name = CString::new(link).unwrap();
-        let target_name = CString::new(target).unwrap();
+    let mut created_entries = Vec::new();
+    
+    for (link, target, description) in &test_cases {
+        let link_name = CString::new(*link).unwrap();
+        let target_name = CString::new(*target).unwrap();
 
         let entry = fs.symlink(ctx, &target_name, 1, &link_name, Extensions::default())?;
-        assert_eq!(entry.attr.st_mode & libc::S_IFMT, libc::S_IFLNK);
-
-        // Verify symlink target
-        let target_bytes = fs.readlink(ctx, entry.inode)?;
-        assert_eq!(target_bytes, target_name.to_bytes());
+        assert_eq!(entry.attr.st_mode & libc::S_IFMT, libc::S_IFLNK,
+            "{}: Should create symlink", description);
+        
+        created_entries.push((entry.inode, target_name.clone(), description));
     }
 
     // Verify all symlinks exist in the top layer
     let top_layer = temp_dirs.last().unwrap().path();
-    for (link, _) in test_cases {
-        assert!(fs::symlink_metadata(top_layer.join(link)).is_ok());
+    
+    #[cfg(target_os = "linux")]
+    {
+        for (link, _, description) in &test_cases {
+            let link_path = top_layer.join(link);
+            assert!(link_path.exists(), 
+                "{}: Symlink should exist in top layer", description);
+            
+            // Verify it's a file-backed symlink
+            let metadata = fs::metadata(&link_path)?;
+            assert!(metadata.is_file(),
+                "{}: Should be a regular file on Linux", description);
+            
+            // Verify xattr exists
+            let xattr = helper::get_xattr(&link_path, "user.containers.override_stat")?;
+            assert!(xattr.is_some(),
+                "{}: Should have override_stat xattr", description);
+            
+            // Read file content to verify target
+            let content = fs::read(&link_path)?;
+            let (_, target, _) = test_cases.iter()
+                .find(|(l, _, _)| l == link)
+                .unwrap();
+            assert_eq!(content, target.as_bytes(),
+                "{}: File content should match symlink target", description);
+        }
+    }
+    
+    #[cfg(target_os = "macos")]
+    {
+        for (link, target, description) in &test_cases {
+            let link_path = top_layer.join(link);
+            assert!(link_path.exists(), 
+                "{}: Symlink should exist in top layer", description);
+            
+            // Verify it's a regular symlink
+            let metadata = fs::symlink_metadata(&link_path)?;
+            assert!(metadata.file_type().is_symlink(),
+                "{}: Should be a symlink on macOS", description);
+            
+            // Verify target through filesystem
+            let fs_target = fs::read_link(&link_path)?;
+            assert_eq!(fs_target.to_str().unwrap(), *target,
+                "{}: Filesystem symlink should point to correct target", description);
+        }
+    }
+
+    // Verify symlink targets through the VFS API
+    for (inode, expected_target, description) in created_entries {
+        let target_bytes = fs.readlink(ctx, inode)?;
+        assert_eq!(target_bytes, expected_target.to_bytes(),
+            "{}: readlink should return correct target", description);
+    }
+
+    // Test 2: Create symlink in shared_dir (which exists in all layers)
+    let shared_dir_name = CString::new("shared_dir").unwrap();
+    let shared_dir_entry = fs.lookup(ctx, 1, &shared_dir_name)?;
+    
+    let shared_link_name = CString::new("shared_link").unwrap();
+    let shared_target = CString::new("bottom_file").unwrap();
+    let shared_link_entry = fs.symlink(
+        ctx,
+        &shared_target,
+        shared_dir_entry.inode,
+        &shared_link_name,
+        Extensions::default(),
+    )?;
+    
+    // Verify the symlink was created in the top layer's shared_dir
+    let shared_link_path = top_layer.join("shared_dir/shared_link");
+    assert!(shared_link_path.exists(),
+        "Symlink in shared directory should exist in top layer");
+    
+    let shared_target_read = fs.readlink(ctx, shared_link_entry.inode)?;
+    assert_eq!(shared_target_read, shared_target.to_bytes(),
+        "Symlink in shared directory should have correct target");
+
+    // Test 3: Verify that symlinks don't affect the visibility of their targets
+    // The targets should still be accessible from their original locations
+    for dir in ["bottom_dir", "middle_dir", "top_dir"] {
+        let dir_cstr = CString::new(dir).unwrap();
+        let dir_entry = fs.lookup(ctx, 1, &dir_cstr)?;
+        assert_eq!(dir_entry.attr.st_mode & libc::S_IFMT, libc::S_IFDIR,
+            "{} should still be accessible as a directory", dir);
     }
 
     Ok(())
