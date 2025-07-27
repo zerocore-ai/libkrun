@@ -265,6 +265,14 @@ fn test_mknod_basic() -> io::Result<()> {
 
 #[test]
 fn test_symlink_basic() -> io::Result<()> {
+    // Test basic symlink creation in passthrough filesystem
+    // This test verifies:
+    // 1. Creating a symlink through the filesystem API
+    // 2. The symlink has correct mode (S_IFLNK)
+    // 3. The physical representation on disk matches platform behavior
+    // 4. The symlink can be read correctly through the VFS API
+    // 5. Extended attributes are properly set based on context
+    
     // Create test directory with a target file
     let files = vec![("target_file", false, 0o644)];
 
@@ -274,7 +282,7 @@ fn test_symlink_basic() -> io::Result<()> {
     // Initialize filesystem
     fs.init(FsOptions::empty())?;
 
-    // Create a symlink
+    // Create a symlink with specific context
     let link_name = CString::new("symlink").unwrap();
     let target_name = CString::new("target_file").unwrap();
     let ctx = Context {
@@ -284,27 +292,112 @@ fn test_symlink_basic() -> io::Result<()> {
     };
     let entry = fs.symlink(ctx, &target_name, 1, &link_name, Extensions::default())?;
 
-    // Verify the symlink was created
-    assert_eq!(entry.attr.st_mode & libc::S_IFMT, libc::S_IFLNK);
+    // Verify the symlink was created with correct attributes through VFS
+    assert_eq!(entry.attr.st_mode & libc::S_IFMT, libc::S_IFLNK,
+        "Created entry should have S_IFLNK file type");
+    assert_eq!(entry.attr.st_uid, 1000, "Should have context uid");
+    assert_eq!(entry.attr.st_gid, 1000, "Should have context gid");
+    assert_eq!(entry.attr.st_mode & 0o777, 0o777,
+        "Symlinks should have 0777 permissions");
 
     // Verify the symlink exists on disk
     let link_path = temp_dir.path().join("symlink");
-    assert!(link_path.exists());
-    let metadata = fs::symlink_metadata(&link_path)?;
-    assert!(metadata.file_type().is_symlink());
-
-    // Verify the symlink points to the correct target
-    let target = fs::read_link(&link_path)?;
-    assert_eq!(target.to_str().unwrap(), "target_file");
-
-    // Check if xattr was set (some filesystems don't support xattrs on symlinks)
-    let xattr_value = helper::get_xattr(&link_path, "user.containers.override_stat")?;
-    if xattr_value.is_some() {
-        let xattr_str = xattr_value.unwrap();
-    let parts: Vec<&str> = xattr_str.split(':').collect();
-        assert_eq!(parts[0], "1000"); // Context default uid
-        assert_eq!(parts[1], "1000"); // Context default gid
+    assert!(link_path.exists(), "Symlink should exist on disk");
+    
+    // Platform-specific verification
+    #[cfg(target_os = "linux")]
+    {
+        // On Linux, passthrough creates file-backed symlinks to support xattrs
+        let metadata = fs::metadata(&link_path)?;
+        assert!(metadata.is_file(),
+            "On Linux passthrough, symlinks should be file-backed");
+        
+        // Verify the override xattr is set correctly
+        let xattr_value = helper::get_xattr(&link_path, "user.containers.override_stat")?;
+        assert!(xattr_value.is_some(),
+            "File-backed symlink should have override_stat xattr");
+        
+        if let Some(xattr_str) = xattr_value {
+            let parts: Vec<&str> = xattr_str.split(':').collect();
+            assert!(parts.len() >= 3, "xattr should have at least uid:gid:mode");
+            assert_eq!(parts[0], "1000", "xattr should store context uid");
+            assert_eq!(parts[1], "1000", "xattr should store context gid");
+            
+            // Verify the mode in xattr indicates this is a symlink
+            let mode = u32::from_str_radix(parts[2], 8).expect("mode should be valid octal");
+            assert_eq!(mode & libc::S_IFMT, libc::S_IFLNK,
+                "xattr mode should indicate S_IFLNK file type");
+            assert_eq!(mode & 0o777, 0o777,
+                "xattr should preserve symlink permissions");
+        }
+        
+        // Verify the file content contains the link target
+        let file_content = fs::read(&link_path)?;
+        assert_eq!(file_content, target_name.to_bytes(),
+            "File content should contain the symlink target");
     }
+    
+    #[cfg(target_os = "macos")]
+    {
+        // On macOS, verify it's a regular symlink
+        let metadata = fs::symlink_metadata(&link_path)?;
+        assert!(metadata.file_type().is_symlink(),
+            "On macOS, should be a regular symlink");
+        
+        // Verify the symlink points to the correct target
+        let target = fs::read_link(&link_path)?;
+        assert_eq!(target.to_str().unwrap(), "target_file",
+            "Symlink should point to correct target");
+        
+        // Check if xattr was set (macOS supports xattrs on symlinks)
+        let xattr_value = helper::get_xattr(&link_path, "user.containers.override_stat")?;
+        if let Some(xattr_str) = xattr_value {
+            let parts: Vec<&str> = xattr_str.split(':').collect();
+            assert!(parts.len() >= 3, "xattr should have at least uid:gid:mode");
+            assert_eq!(parts[0], "1000", "xattr should store context uid");
+            assert_eq!(parts[1], "1000", "xattr should store context gid");
+        }
+    }
+
+    // Test VFS operations on the symlink
+    
+    // 1. Verify we can look up the symlink
+    let lookup_entry = fs.lookup(ctx, 1, &link_name)?;
+    assert_eq!(lookup_entry.inode, entry.inode,
+        "Lookup should return same inode");
+    assert_eq!(lookup_entry.attr.st_mode & libc::S_IFMT, libc::S_IFLNK,
+        "Looked up entry should be a symlink");
+    
+    // 2. Verify readlink works correctly
+    let target_read = fs.readlink(ctx, entry.inode)?;
+    assert_eq!(target_read, target_name.to_bytes(),
+        "readlink should return correct target");
+    
+    // 3. Verify that operations through the symlink fail appropriately
+    match fs.lookup(ctx, entry.inode, &CString::new("anything").unwrap()) {
+        Err(e) => assert_eq!(e.raw_os_error(), Some(libc::ENOTDIR),
+            "Lookup through symlink should fail with ENOTDIR"),
+        Ok(_) => panic!("Lookup through symlink should fail"),
+    }
+    
+    // 4. Test creating another symlink with different permissions
+    let link2_name = CString::new("symlink2").unwrap();
+    let abs_target = CString::new("/absolute/path").unwrap();
+    let ctx2 = Context {
+        uid: 2000,
+        gid: 2000,
+        pid: 5678,
+    };
+    let entry2 = fs.symlink(ctx2, &abs_target, 1, &link2_name, Extensions::default())?;
+    
+    // Verify the second symlink has different ownership
+    assert_eq!(entry2.attr.st_uid, 2000, "Should have second context uid");
+    assert_eq!(entry2.attr.st_gid, 2000, "Should have second context gid");
+    
+    // Verify absolute path is preserved
+    let target2_read = fs.readlink(ctx2, entry2.inode)?;
+    assert_eq!(target2_read, abs_target.to_bytes(),
+        "Absolute paths should be preserved in symlinks");
 
     Ok(())
 }

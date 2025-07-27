@@ -1164,3 +1164,68 @@ fn test_special_files_metadata() -> io::Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_setattr_symlink() -> io::Result<()> {
+    // Create test layers with a target file
+    let layers = vec![vec![("target", false, 0o644)]];
+
+    let (fs, temp_dirs) = helper::create_overlayfs(layers)?;
+    helper::debug_print_layers(&temp_dirs, false)?;
+
+    // Initialize filesystem
+    fs.init(FsOptions::empty())?;
+
+    // Create a symlink
+    let link_name = CString::new("link").unwrap();
+    let target_name = CString::new("target").unwrap();
+    let ctx = Context { uid: 1000, gid: 1000, pid: 1234 };
+    
+    let link_entry = fs.symlink(ctx, &target_name, 1, &link_name, Extensions::default())?;
+    
+    // Verify symlink was created
+    assert_eq!(link_entry.attr.st_mode & libc::S_IFMT, libc::S_IFLNK);
+    
+    // Try to change ownership on symlink
+    let mut attr = link_entry.attr;
+    attr.st_uid = 4000;
+    attr.st_gid = 4000;
+    let valid = SetattrValid::UID | SetattrValid::GID;
+    
+    // On Linux, this should fail with EOPNOTSUPP because we can't virtualize symlink ownership
+    #[cfg(target_os = "linux")]
+    {
+        let result = fs.setattr(ctx, link_entry.inode, attr, None, valid);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EOPNOTSUPP));
+        println!("Linux correctly rejects symlink ownership changes");
+    }
+    
+    // On macOS, this should succeed because macOS supports xattr on symlinks
+    #[cfg(target_os = "macos")]
+    {
+        let (new_attr, _) = fs.setattr(ctx, link_entry.inode, attr, None, valid)?;
+        
+        // Verify the virtualized uid/gid
+        assert_eq!(new_attr.st_uid, 4000);
+        assert_eq!(new_attr.st_gid, 4000);
+
+        // Verify xattr was set on the symlink itself
+        let link_path = temp_dirs.last().unwrap().path().join("link");
+        let xattr_value = helper::get_xattr(&link_path, "user.containers.override_stat")?;
+        assert!(xattr_value.is_some(), "macOS should support xattr on symlinks");
+        
+        let xattr_str = xattr_value.unwrap();
+        let parts: Vec<&str> = xattr_str.split(':').collect();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0], "4000"); // uid
+        assert_eq!(parts[1], "4000"); // gid
+        // Verify the mode includes symlink file type
+        let mode = u32::from_str_radix(parts[2], 8).unwrap();
+        assert_eq!(mode & mode_cast!(libc::S_IFMT), mode_cast!(libc::S_IFLNK)); // Should be a symlink
+        
+        println!("macOS successfully virtualizes symlink ownership");
+    }
+    
+    Ok(())
+}
