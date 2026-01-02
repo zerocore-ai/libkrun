@@ -517,6 +517,31 @@ pub extern "C" fn krun_set_vm_config(ctx_id: u32, num_vcpus: u8, ram_mib: u32) -
     KRUN_SUCCESS
 }
 
+#[cfg(all(not(feature = "tee"), target_os = "macos"))]
+fn add_rosetta_device(cfg: &mut ContextConfig) {
+    const ROSETTA_DEFAULT_HOST_DIR: &str = "/Library/Apple/usr/libexec/oah/RosettaLinux";
+    const ROSETTA_GUEST_TAG: &str = "rosetta";
+
+    // If rosetta directory doesn't exist, do nothing
+    if !std::path::Path::new(ROSETTA_DEFAULT_HOST_DIR).exists() {
+        return;
+    }
+
+    // Check if rosetta device is already added
+    let fs_id = ROSETTA_GUEST_TAG.to_string();
+    for device in &cfg.vmr.fs {
+        if device.fs_id == fs_id {
+            return;
+        }
+    }
+
+    cfg.vmr.add_fs_device(FsDeviceConfig {
+        fs_id,
+        fs_share: FsImplShare::Passthrough(ROSETTA_DEFAULT_HOST_DIR.to_string()),
+        shm_size: None,
+    });
+}
+
 #[allow(clippy::missing_safety_doc)]
 #[no_mangle]
 #[cfg(not(feature = "tee"))]
@@ -546,6 +571,9 @@ pub unsafe extern "C" fn krun_set_root(ctx_id: u32, c_root_path: *const c_char) 
                 // Default to a conservative 512 MB window.
                 shm_size: Some(1 << 29),
             });
+
+            #[cfg(all(target_os = "macos"))]
+            add_rosetta_device(cfg);
         }
         Entry::Vacant(_) => return -libc::ENOENT,
     }
@@ -600,6 +628,9 @@ pub unsafe extern "C" fn krun_set_overlayfs_root(
                 // Default to a conservative 512 MB window.
                 shm_size: Some(1 << 29),
             });
+
+            #[cfg(all(target_os = "macos"))]
+            add_rosetta_device(cfg);
         }
         Entry::Vacant(_) => return -libc::ENOENT,
     }
@@ -699,6 +730,7 @@ pub unsafe extern "C" fn krun_set_mapped_volumes(
 ) -> i32 {
     -libc::EINVAL
 }
+
 
 #[allow(clippy::missing_safety_doc)]
 #[no_mangle]
