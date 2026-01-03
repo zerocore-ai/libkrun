@@ -11,7 +11,7 @@ fi
 
 SCRIPTPATH=`realpath $0`
 WORKDIR=`dirname $SCRIPTPATH`
-krunvm create fedora --name libkrun-builder -v $WORKDIR:/work -w /work
+krunvm create fedora --name libkrun-builder -v $WORKDIR:/work -w /work --x86
 if [ $? != 0 ]; then
 	echo "Error creating lightweight VM"
 	exit -1
