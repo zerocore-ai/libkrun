@@ -991,7 +991,6 @@ cleanup_fd:
     return ret;
 }
 
-#ifdef __ROSETTA__
 char rosetta_binary[] = "/.rosetta/rosetta\0";
 char binfmt_rosetta[] =
     ":rosetta:M::"
@@ -1003,24 +1002,29 @@ char binfmt_rosetta[] =
 static void enable_rosetta()
 {
     int fd;
-
+    printf("Enabling rosetta\n");
     if (mount("binfmt_misc", "/proc/sys/fs/binfmt_misc", "binfmt_misc",
               MS_NOEXEC | MS_NOSUID | MS_RELATIME, NULL) < 0) {
         perror("mount(binfmt_misc)");
         exit(-1);
     } else {
+        printf("Mounted binfmt_misc\n");
         fd = open("/proc/sys/fs/binfmt_misc/register", O_WRONLY);
         if (fd >= 0) {
+            printf("Opened binfmt_misc\n");
             if (write(fd, &binfmt_rosetta[0], strlen(binfmt_rosetta)) < 0) {
+                printf("Failed to write to binfmt_misc\n");
                 perror("write to binfmt_misc");
+            }else {
+                printf("Wrote to binfmt_misc\n");
             }
             close(fd);
         } else {
+            printf("Failed to open binfmt_misc\n");
             perror("open binfmt_misc");
         }
     }
 }
-#endif
 
 #ifdef __TIMESYNC__
 
@@ -1214,11 +1218,9 @@ int main(int argc, char **argv)
 
     config_parse_file(&config_argv, &config_workdir);
 
-#ifdef __ROSETTA__
     if (access(rosetta_binary, F_OK) == 0) {
         enable_rosetta();
     }
-#endif
 
     krun_home = getenv("KRUN_HOME");
     if (krun_home) {

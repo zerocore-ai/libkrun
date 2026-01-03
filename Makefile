@@ -53,10 +53,6 @@ ifeq ($(NITRO),1)
 	BUILD_INIT = 0
 endif
 
-ifeq ($(ROSETTA),1)
-    INIT_DEFS += -D__ROSETTA__
-    FEATURE_FLAGS += --features rosetta
-endif
 ifeq ($(TIMESYNC),1)
     INIT_DEFS += -D__TIMESYNC__
 endif

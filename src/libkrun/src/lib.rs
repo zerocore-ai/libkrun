@@ -517,13 +517,14 @@ pub extern "C" fn krun_set_vm_config(ctx_id: u32, num_vcpus: u8, ram_mib: u32) -
     KRUN_SUCCESS
 }
 
-#[cfg(all(not(feature = "tee"), target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn add_rosetta_device(cfg: &mut ContextConfig) {
     const ROSETTA_DEFAULT_HOST_DIR: &str = "/Library/Apple/usr/libexec/oah/RosettaLinux";
     const ROSETTA_GUEST_TAG: &str = "rosetta";
 
     // If rosetta directory doesn't exist, do nothing
     if !std::path::Path::new(ROSETTA_DEFAULT_HOST_DIR).exists() {
+        println!("Rosetta directory does not exist");
         return;
     }
 
@@ -531,10 +532,12 @@ fn add_rosetta_device(cfg: &mut ContextConfig) {
     let fs_id = ROSETTA_GUEST_TAG.to_string();
     for device in &cfg.vmr.fs {
         if device.fs_id == fs_id {
+            println!("Rosetta device already added");
             return;
         }
     }
 
+    println!("Adding rosetta device");
     cfg.vmr.add_fs_device(FsDeviceConfig {
         fs_id,
         fs_share: FsImplShare::Passthrough(ROSETTA_DEFAULT_HOST_DIR.to_string()),
