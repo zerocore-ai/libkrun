@@ -617,6 +617,41 @@ static int mount_filesystems()
     return 0;
 }
 
+#ifdef __FEX_EMU__
+static void register_fex_binfmt()
+{
+    int fd;
+    char binfmt_fex[] =
+        ":FEX:M:0:"
+        "\\x7fELF\\x02\\x01\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x02\\x00\\x3e\\x00:"
+        "\\xff\\xff\\xff\\xff\\xff\\xfe\\xfe\\x00\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xfe\\xff\\xff\\xff:"
+        "/usr/bin/FEX:CF\n";
+    
+    printf("Registering FEX-Emu for x86_64 binaries\n");
+    if (mount("binfmt_misc", "/proc/sys/fs/binfmt_misc", "binfmt_misc",
+		  MS_NOEXEC | MS_NOSUID | MS_RELATIME, NULL) < 0) {
+        printf("Failed to mount binfmt_misc\n");
+        perror("mount(binfmt_misc)");
+		exit(-1);
+	} else {
+        printf("Mounted binfmt_misc\n");
+		fd = open("/proc/sys/fs/binfmt_misc/register", O_WRONLY);
+		if (fd >= 0) {
+            printf("Opened binfmt_misc\n");
+			if (write(fd, &binfmt_fex[0], strlen(binfmt_fex)) < 0) {
+				printf("Failed to write to binfmt_misc\n");
+				perror("write to binfmt_misc");
+			}
+            printf("Wrote to binfmt_misc\n");
+			close(fd);
+		} else {
+            printf("Failed to open binfmt_misc\n");
+			perror("open binfmt_misc");
+		}
+	}
+}
+#endif
+
 /*
  * hexToDigit, Utf32toUtf8 and parts of unescape_string are taken from libyajl:
  *
@@ -1165,6 +1200,16 @@ int main(int argc, char **argv)
         printf("Couldn't mount filesystems, bailing out\n");
         exit(-2);
     }
+
+#ifdef __FEX_EMU__
+    printf("Registering FEX-Emu for x86_64 binaries\n");
+    if (access("/usr/bin/FEX", X_OK) == 0) {
+        printf("FEX binary available. Configuring binfmt_misc to use it\n");
+        register_fex_binfmt();
+    } else {
+        printf("FEX binary not available, skipping setup\n");
+    }
+#endif
 
     setsid();
     ioctl(0, TIOCSCTTY, 1);

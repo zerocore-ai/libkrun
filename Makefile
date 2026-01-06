@@ -57,6 +57,10 @@ ifeq ($(TIMESYNC),1)
     INIT_DEFS += -D__TIMESYNC__
 endif
 
+ifeq ($(FEX_EMU),1)
+    INIT_DEFS += -D__FEX_EMU__=1
+endif
+
 OS = $(shell uname -s)
 
 KRUN_BINARY_Linux = libkrun$(VARIANT).so.$(FULL_VERSION)
@@ -90,7 +94,7 @@ INIT_BINARY = init/init
 $(INIT_BINARY): $(INIT_SRC)
 ifeq ($(OS),Darwin)
 	@echo "Building on macOS, using ./build_on_krunvm.sh"
-	./build_on_krunvm.sh
+	FEX_EMU=$(FEX_EMU) ./build_on_krunvm.sh
 else
 	gcc -O2 -static -Wall $(INIT_DEFS) -o $@ $(INIT_SRC) $(INIT_DEFS)
 endif
