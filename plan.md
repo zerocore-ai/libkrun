@@ -683,8 +683,8 @@ impl NetBuilder {
     // Existing
     pub fn backend(self, backend: NetBackend) -> Self;
 
-    // New: accept any impl
-    pub fn custom_backend<B>(self, backend: B) -> Self
+    // New: accept any impl (consistent with FsBuilder::custom)
+    pub fn custom<B>(self, backend: B) -> Self
     where
         B: NetBackendImpl + Send + 'static;
 }
@@ -736,7 +736,7 @@ impl NetBackendImpl for MyNetworkBackend {
 let vm = VmBuilder::new()
     .net(|n| n
         .id("eth0")
-        .custom_backend(MyNetworkBackend::new()?)
+        .custom(MyNetworkBackend::new()?)
         .mac([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]))
     .build()?;
 ```
@@ -896,7 +896,7 @@ impl FsBuilder {
         F: FileSystemImpl + Send + Sync + 'static;
 
     // Or with trait object directly
-    pub fn custom_dyn(self, filesystem: Box<dyn DynFileSystem>) -> Self;
+    pub fn custom_boxed(self, filesystem: Box<dyn DynFileSystem>) -> Self;
 }
 ```
 
