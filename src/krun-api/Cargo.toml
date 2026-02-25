@@ -1,0 +1,46 @@
+[package]
+name = "krun-api"
+version = "0.1.0"
+authors = ["The libkrun Authors"]
+edition = "2021"
+description = "Native Rust API for libkrun microVMs"
+repository = "https://github.com/containers/libkrun"
+license = "Apache-2.0"
+
+[features]
+default = []
+net = []
+blk = []
+gpu = ["krun_display"]
+snd = []
+tee = []
+nitro = ["dep:nitro", "dep:nitro-enclaves"]
+amd-sev = ["blk", "tee"]
+tdx = ["blk", "tee"]
+efi = ["blk", "net"]
+input = ["krun_input", "vmm/input", "devices/input"]
+
+[dependencies]
+crossbeam-channel = ">=0.5.15"
+libc = ">=0.2.39"
+libloading = "0.8"
+log = "0.4.0"
+
+devices = { path = "../devices" }
+polly = { path = "../polly" }
+utils = { path = "../utils" }
+vmm = { path = "../vmm" }
+
+# Optional dependencies
+krun_display = { path = "../krun_display", optional = true, features = ["bindgen_clang_runtime"] }
+krun_input = { path = "../krun_input", optional = true, features = ["bindgen_clang_runtime"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+hvf = { path = "../hvf" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+kvm-bindings = { version = ">=0.11", features = ["fam-wrappers"] }
+kvm-ioctls = ">=0.21"
+vm-memory = { version = ">=0.13", features = ["backend-mmap"] }
+nitro = { path = "../nitro", optional = true }
+nitro-enclaves = { version = "0.5.0", optional = true }
