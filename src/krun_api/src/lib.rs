@@ -1,4 +1,4 @@
-//! krun-api - Native Rust API for libkrun microVMs.
+//! krun_api - Native Rust API for libkrun microVMs.
 //!
 //! This crate provides a builder-pattern API for creating and running microVMs
 //! using libkrun's VMM infrastructure.

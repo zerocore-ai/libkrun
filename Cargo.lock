@@ -832,7 +832,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "krun-api"
+name = "krun_api"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
@@ -1359,7 +1359,7 @@ dependencies = [
 name = "rust_vm"
 version = "0.1.0"
 dependencies = [
- "krun-api",
+ "krun_api",
 ]
 
 [[package]]

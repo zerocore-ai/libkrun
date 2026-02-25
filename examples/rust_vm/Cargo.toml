@@ -4,4 +4,4 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-krun-api = { path = "../../src/krun-api" }
+krun_api = { path = "../../src/krun_api" }
