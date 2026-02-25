@@ -1,6 +1,6 @@
 mod device;
 #[allow(dead_code)]
-mod filesystem;
+pub mod filesystem;
 pub mod fuse;
 #[allow(dead_code)]
 mod multikey;
