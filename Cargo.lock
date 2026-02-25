@@ -832,6 +832,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "krun-api"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "devices",
+ "hvf",
+ "krun_display",
+ "krun_input",
+ "kvm-bindings",
+ "kvm-ioctls",
+ "libc",
+ "libloading",
+ "log",
+ "nitro",
+ "nitro-enclaves",
+ "polly",
+ "utils",
+ "vm-memory",
+ "vmm",
+]
+
+[[package]]
 name = "krun_display"
 version = "0.1.0"
 dependencies = [
@@ -1331,6 +1353,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "rust_vm"
+version = "0.1.0"
+dependencies = [
+ "krun-api",
 ]
 
 [[package]]
