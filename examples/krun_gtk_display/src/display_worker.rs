@@ -1,8 +1,8 @@
 use super::scanout_paintable::ScanoutPaintable;
 use crate::{Axis, DisplayEvent, DisplayInputOptions, TouchArea, TouchScreenOptions};
-use krun_display::Rect;
-use krun_input::{InputEvent, InputEventType};
 use log::{debug, trace, warn};
+use msb_krun_display::Rect;
+use msb_krun_input::{InputEvent, InputEventType};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::iter;
@@ -31,7 +31,7 @@ use gtk::{
     graphene::Point,
     prelude::*,
 };
-use krun_display::MAX_DISPLAYS;
+use msb_krun_display::MAX_DISPLAYS;
 
 type EventSender = PollableChannelSender<InputEvent>;
 

@@ -1,4 +1,5 @@
 mod device;
+pub mod dyn_filesystem;
 #[allow(dead_code)]
 pub mod filesystem;
 pub mod fuse;
@@ -25,6 +26,7 @@ use super::descriptor_utils;
 
 pub use self::defs::uapi::VIRTIO_ID_FS as TYPE_FS;
 pub use self::device::Fs;
+pub use self::dyn_filesystem::{DynFileSystem, DynFileSystemAdapter};
 pub use self::filesystem::ExportTable;
 
 mod defs {

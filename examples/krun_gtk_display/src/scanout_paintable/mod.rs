@@ -8,7 +8,7 @@ use gtk::{
     prelude::*,
     subclass::prelude::*,
 };
-use krun_display::{Rect, ResourceFormat};
+use msb_krun_display::{Rect, ResourceFormat};
 
 glib::wrapper! {
     pub struct ScanoutPaintable(ObjectSubclass<imp::ScanoutPaintable>) @implements gdk::Paintable;

@@ -412,8 +412,7 @@ impl ExecBuilder {
 
     /// Set a resource limit.
     pub fn rlimit(mut self, resource: &str, soft: u64, hard: u64) -> Self {
-        self.rlimits
-            .push((resource.to_string(), soft, hard));
+        self.rlimits.push((resource.to_string(), soft, hard));
         self
     }
 }

@@ -147,6 +147,9 @@ pub struct VmResources {
     /// The fs device.
     #[cfg(not(feature = "tee"))]
     pub fs: Vec<FsDeviceConfig>,
+    /// Custom filesystem devices.
+    #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+    pub custom_fs: Vec<CustomFsDeviceConfig>,
     /// The vsock device.
     pub vsock: VsockBuilder,
     /// The virtio-blk device.
@@ -410,6 +413,8 @@ mod tests {
             kernel_bundle: Default::default(),
             external_kernel: None,
             fs: Default::default(),
+            #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+            custom_fs: Default::default(),
             vsock: Default::default(),
             #[cfg(feature = "net")]
             net_builder: Default::default(),

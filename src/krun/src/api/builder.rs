@@ -1,18 +1,23 @@
 //! VM Builder for creating and configuring microVMs using nested builders.
 
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+use std::sync::Arc;
+
 use vmm::resources::VmResources;
 use vmm::vmm_config::machine_config::VmConfig;
 
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+use vmm::vmm_config::fs::CustomFsDeviceConfig;
 #[cfg(not(feature = "tee"))]
 use vmm::vmm_config::fs::FsDeviceConfig;
 
-use super::builders::{ConsoleBuilder, ExecBuilder, FsBuilder, KernelBuilder, MachineBuilder};
-#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
-use super::builders::FsConfig;
 #[cfg(feature = "blk")]
 use super::builders::DiskBuilder;
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+use super::builders::FsConfig;
 #[cfg(feature = "net")]
 use super::builders::NetBuilder;
+use super::builders::{ConsoleBuilder, ExecBuilder, FsBuilder, KernelBuilder, MachineBuilder};
 
 use super::error::{ConfigError, Error, Result};
 use super::vm::Vm;
@@ -28,7 +33,7 @@ use super::vm::Vm;
 /// # Example
 ///
 /// ```rust,no_run
-/// use krun_api::VmBuilder;
+/// use msb_krun::VmBuilder;
 ///
 /// let vm = VmBuilder::new()
 ///     .machine(|m| m.vcpus(4).memory_mib(2048))
@@ -40,6 +45,7 @@ use super::vm::Vm;
 pub struct VmBuilder {
     machine: MachineBuilder,
     kernel: KernelBuilder,
+    #[cfg_attr(feature = "tee", allow(dead_code))]
     fs: FsBuilder,
     console: ConsoleBuilder,
     exec: ExecBuilder,
@@ -80,7 +86,7 @@ impl VmBuilder {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use krun_api::VmBuilder;
+    /// # use msb_krun::VmBuilder;
     /// VmBuilder::new()
     ///     .machine(|m| m.vcpus(4).memory_mib(2048).nested_virt(true));
     /// ```
@@ -94,7 +100,7 @@ impl VmBuilder {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use krun_api::VmBuilder;
+    /// # use msb_krun::VmBuilder;
     /// VmBuilder::new()
     ///     .kernel(|k| k.cmdline("console=hvc0 debug"));
     /// ```
@@ -110,7 +116,7 @@ impl VmBuilder {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use krun_api::VmBuilder;
+    /// # use msb_krun::VmBuilder;
     /// VmBuilder::new()
     ///     .fs(|fs| fs.root("/path/to/rootfs"))
     ///     .fs(|fs| fs.tag("data").path("/host/data"));
@@ -129,7 +135,7 @@ impl VmBuilder {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use krun_api::VmBuilder;
+    /// # use msb_krun::VmBuilder;
     /// // VmBuilder::new()
     /// //     .net(|n| n.mac([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]).custom(my_backend));
     /// ```
@@ -147,7 +153,7 @@ impl VmBuilder {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use krun_api::VmBuilder;
+    /// # use msb_krun::VmBuilder;
     /// // VmBuilder::new()
     /// //     .disk(|d| d.path("/path/to/disk.img").read_only(true));
     /// ```
@@ -163,7 +169,7 @@ impl VmBuilder {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use krun_api::VmBuilder;
+    /// # use msb_krun::VmBuilder;
     /// VmBuilder::new()
     ///     .console(|c| c.output("/tmp/vm.log"));
     /// ```
@@ -177,7 +183,7 @@ impl VmBuilder {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use krun_api::VmBuilder;
+    /// # use msb_krun::VmBuilder;
     /// VmBuilder::new()
     ///     .exec(|e| e
     ///         .path("/bin/myapp")
@@ -209,10 +215,12 @@ impl VmBuilder {
         let mut vmr = VmResources::default();
 
         // Apply machine configuration
-        let mut vm_config = VmConfig::default();
-        vm_config.vcpu_count = Some(self.machine.vcpus);
-        vm_config.mem_size_mib = Some(self.machine.memory_mib);
-        vm_config.ht_enabled = Some(self.machine.hyperthreading);
+        let vm_config = VmConfig {
+            vcpu_count: Some(self.machine.vcpus),
+            mem_size_mib: Some(self.machine.memory_mib),
+            ht_enabled: Some(self.machine.hyperthreading),
+            ..Default::default()
+        };
         let _ = vmr.set_vm_config(&vm_config);
         vmr.nested_enabled = self.machine.nested_virt;
 
@@ -223,21 +231,30 @@ impl VmBuilder {
 
         // Apply filesystem configuration
         #[cfg(not(feature = "tee"))]
-        for config in &self.fs.configs {
+        for config in self.fs.configs {
             match config {
-                FsConfig::Path { tag, path, shm_size } => {
+                FsConfig::Path {
+                    tag,
+                    path,
+                    shm_size,
+                } => {
                     let fs_config = FsDeviceConfig {
-                        fs_id: tag.clone(),
+                        fs_id: tag,
                         shared_dir: path.to_string_lossy().to_string(),
-                        shm_size: *shm_size,
+                        shm_size,
                         allow_root_dir_delete: false,
                     };
                     vmr.fs.push(fs_config);
                 }
                 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
-                FsConfig::Custom { tag: _, backend: _ } => {
-                    // TODO: Custom filesystem backends require vmm modifications
-                    // For now, we track them but can't wire them up yet
+                FsConfig::Custom { tag, backend } => {
+                    let backend: Box<dyn devices::virtio::fs::DynFileSystem> = backend;
+                    let custom_config = CustomFsDeviceConfig {
+                        fs_id: tag,
+                        backend: Arc::from(backend),
+                        shm_size: None,
+                    };
+                    vmr.custom_fs.push(custom_config);
                 }
             }
         }

@@ -9,9 +9,9 @@ use crate::input_backend::{GtkInputEventProvider, GtkKeyboardConfig, GtkTouchscr
 use anyhow::Context;
 pub use display_backend::DisplayEvent;
 pub use display_backend::GtkDisplayBackend;
-use krun_display::{DisplayBackend, IntoDisplayBackend};
-use krun_input::{InputAbsInfo, InputConfigBackend, InputEventProviderBackend};
-use krun_input::{InputEvent, IntoInputConfig, IntoInputEvents};
+use msb_krun_display::{DisplayBackend, IntoDisplayBackend};
+use msb_krun_input::{InputAbsInfo, InputConfigBackend, InputEventProviderBackend};
+use msb_krun_input::{InputEvent, IntoInputConfig, IntoInputEvents};
 use utils::pollable_channel::{PollableChannelReciever, PollableChannelSender, pollable_channel};
 
 pub struct DisplayBackendHandle {
