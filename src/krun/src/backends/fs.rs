@@ -9,7 +9,7 @@
 //! use std::ffi::CStr;
 //! use std::io;
 //! use std::time::Duration;
-//! use krun::backends::fs::{DynFileSystem, Context, Entry, FsOptions};
+//! use msb_krun::backends::fs::{DynFileSystem, Context, Entry, FsOptions};
 //!
 //! struct MyFileSystem {
 //!     // ... your implementation

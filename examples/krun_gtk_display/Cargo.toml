@@ -5,7 +5,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-utils = { path = "../../src/utils" } # Our version of rust vmm-sys-util
+utils = { path = "../../src/utils", package = "msb_krun_utils" } # Our version of rust vmm-sys-util
 gtk = { version = "0.10", package = "gtk4", features = ["v4_16"] }
 msb_krun_display = { path = "../../src/krun_display" }
 msb_krun_input = { path = "../../src/krun_input" }
