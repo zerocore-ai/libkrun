@@ -1,5 +1,10 @@
 //! VM handle for running microVMs.
 
+#[cfg(target_os = "linux")]
+use std::env;
+#[cfg(target_os = "linux")]
+use std::ffi::CString;
+
 use crossbeam_channel::unbounded;
 use log::error;
 use polly::event_manager::EventManager;
@@ -40,6 +45,7 @@ pub struct Vm {
 
 impl Vm {
     /// Create a new Vm instance.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         vmr: VmResources,
         exec_path: Option<String>,

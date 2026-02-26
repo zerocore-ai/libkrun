@@ -214,10 +214,12 @@ impl VmBuilder {
         let mut vmr = VmResources::default();
 
         // Apply machine configuration
-        let mut vm_config = VmConfig::default();
-        vm_config.vcpu_count = Some(self.machine.vcpus);
-        vm_config.mem_size_mib = Some(self.machine.memory_mib);
-        vm_config.ht_enabled = Some(self.machine.hyperthreading);
+        let vm_config = VmConfig {
+            vcpu_count: Some(self.machine.vcpus),
+            mem_size_mib: Some(self.machine.memory_mib),
+            ht_enabled: Some(self.machine.hyperthreading),
+            ..Default::default()
+        };
         let _ = vmr.set_vm_config(&vm_config);
         vmr.nested_enabled = self.machine.nested_virt;
 
