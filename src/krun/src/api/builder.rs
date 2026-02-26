@@ -1,10 +1,15 @@
 //! VM Builder for creating and configuring microVMs using nested builders.
 
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+use std::sync::Arc;
+
 use vmm::resources::VmResources;
 use vmm::vmm_config::machine_config::VmConfig;
 
 #[cfg(not(feature = "tee"))]
 use vmm::vmm_config::fs::FsDeviceConfig;
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+use vmm::vmm_config::fs::CustomFsDeviceConfig;
 
 use super::builders::{ConsoleBuilder, ExecBuilder, FsBuilder, KernelBuilder, MachineBuilder};
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
@@ -223,21 +228,26 @@ impl VmBuilder {
 
         // Apply filesystem configuration
         #[cfg(not(feature = "tee"))]
-        for config in &self.fs.configs {
+        for config in self.fs.configs {
             match config {
                 FsConfig::Path { tag, path, shm_size } => {
                     let fs_config = FsDeviceConfig {
-                        fs_id: tag.clone(),
+                        fs_id: tag,
                         shared_dir: path.to_string_lossy().to_string(),
-                        shm_size: *shm_size,
+                        shm_size,
                         allow_root_dir_delete: false,
                     };
                     vmr.fs.push(fs_config);
                 }
                 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
-                FsConfig::Custom { tag: _, backend: _ } => {
-                    // TODO: Custom filesystem backends require vmm modifications
-                    // For now, we track them but can't wire them up yet
+                FsConfig::Custom { tag, backend } => {
+                    let backend: Box<dyn devices::virtio::fs::DynFileSystem> = backend;
+                    let custom_config = CustomFsDeviceConfig {
+                        fs_id: tag,
+                        backend: Arc::from(backend),
+                        shm_size: None,
+                    };
+                    vmr.custom_fs.push(custom_config);
                 }
             }
         }

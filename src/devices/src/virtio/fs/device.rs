@@ -15,7 +15,8 @@ use vm_memory::{ByteValued, GuestMemoryMmap};
 use super::super::{
     ActivateResult, DeviceQueue, DeviceState, FsError, QueueConfig, VirtioDevice, VirtioShmRegion,
 };
-use super::passthrough;
+use super::dyn_filesystem::{DynFileSystem, DynFileSystemAdapter};
+use super::passthrough::{self, PassthroughFs};
 use super::worker::FsWorker;
 use super::ExportTable;
 use super::{defs, defs::uapi};
@@ -39,13 +40,18 @@ impl Default for VirtioFsConfig {
 
 unsafe impl ByteValued for VirtioFsConfig {}
 
+enum FsBackend {
+    Passthrough(passthrough::Config),
+    Custom(Arc<dyn DynFileSystem>),
+}
+
 pub struct Fs {
     avail_features: u64,
     acked_features: u64,
     device_state: DeviceState,
     config: VirtioFsConfig,
     shm_region: Option<VirtioShmRegion>,
-    passthrough_cfg: passthrough::Config,
+    backend: FsBackend,
     worker_thread: Option<JoinHandle<()>>,
     worker_stopfd: EventFd,
     exit_code: Arc<AtomicI32>,
@@ -79,7 +85,34 @@ impl Fs {
             device_state: DeviceState::Inactive,
             config,
             shm_region: None,
-            passthrough_cfg: fs_cfg,
+            backend: FsBackend::Passthrough(fs_cfg),
+            worker_thread: None,
+            worker_stopfd: EventFd::new(EFD_NONBLOCK).map_err(FsError::EventFd)?,
+            exit_code,
+            #[cfg(target_os = "macos")]
+            map_sender: None,
+        })
+    }
+
+    pub fn with_custom_backend(
+        fs_id: String,
+        backend: Arc<dyn DynFileSystem>,
+        exit_code: Arc<AtomicI32>,
+    ) -> super::Result<Fs> {
+        let avail_features = (1u64 << VIRTIO_F_VERSION_1) | (1u64 << VIRTIO_RING_F_EVENT_IDX);
+
+        let tag = fs_id.into_bytes();
+        let mut config = VirtioFsConfig::default();
+        config.tag[..tag.len()].copy_from_slice(tag.as_slice());
+        config.num_request_queues = 1;
+
+        Ok(Fs {
+            avail_features,
+            acked_features: 0,
+            device_state: DeviceState::Inactive,
+            config,
+            shm_region: None,
+            backend: FsBackend::Custom(backend),
             worker_thread: None,
             worker_stopfd: EventFd::new(EFD_NONBLOCK).map_err(FsError::EventFd)?,
             exit_code,
@@ -97,12 +130,15 @@ impl Fs {
     }
 
     pub fn set_export_table(&mut self, export_table: ExportTable) -> u64 {
-        static FS_UNIQUE_ID: AtomicU64 = AtomicU64::new(0);
-
-        self.passthrough_cfg.export_fsid = FS_UNIQUE_ID.fetch_add(1, Ordering::Relaxed);
-        self.passthrough_cfg.export_table = Some(export_table);
-
-        self.passthrough_cfg.export_fsid
+        match &mut self.backend {
+            FsBackend::Passthrough(cfg) => {
+                static FS_UNIQUE_ID: AtomicU64 = AtomicU64::new(0);
+                cfg.export_fsid = FS_UNIQUE_ID.fetch_add(1, Ordering::Relaxed);
+                cfg.export_table = Some(export_table);
+                cfg.export_fsid
+            }
+            FsBackend::Custom(_) => 0,
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -176,19 +212,39 @@ impl VirtioDevice for Fs {
             queue_evts.push(dq.event);
         }
 
-        let worker = FsWorker::new(
-            worker_queues,
-            queue_evts,
-            interrupt.clone(),
-            mem.clone(),
-            self.shm_region.clone(),
-            self.passthrough_cfg.clone(),
-            self.worker_stopfd.try_clone().unwrap(),
-            self.exit_code.clone(),
-            #[cfg(target_os = "macos")]
-            self.map_sender.clone(),
-        );
-        self.worker_thread = Some(worker.run());
+        let join_handle = match &self.backend {
+            FsBackend::Passthrough(cfg) => {
+                let worker = FsWorker::new(
+                    PassthroughFs::new(cfg.clone()).unwrap(),
+                    worker_queues,
+                    queue_evts,
+                    interrupt.clone(),
+                    mem.clone(),
+                    self.shm_region.clone(),
+                    self.worker_stopfd.try_clone().unwrap(),
+                    self.exit_code.clone(),
+                    #[cfg(target_os = "macos")]
+                    self.map_sender.clone(),
+                );
+                worker.run()
+            }
+            FsBackend::Custom(dyn_fs) => {
+                let worker = FsWorker::new(
+                    DynFileSystemAdapter::new(Arc::clone(dyn_fs)),
+                    worker_queues,
+                    queue_evts,
+                    interrupt.clone(),
+                    mem.clone(),
+                    self.shm_region.clone(),
+                    self.worker_stopfd.try_clone().unwrap(),
+                    self.exit_code.clone(),
+                    #[cfg(target_os = "macos")]
+                    self.map_sender.clone(),
+                );
+                worker.run()
+            }
+        };
+        self.worker_thread = Some(join_handle);
 
         self.device_state = DeviceState::Activated(mem, interrupt);
         Ok(())
