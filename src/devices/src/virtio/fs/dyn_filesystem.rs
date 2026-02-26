@@ -97,6 +97,7 @@ pub trait DynFileSystem: Send + Sync {
     }
 
     /// Create a file node.
+    #[allow(clippy::too_many_arguments)]
     fn mknod(
         &self,
         ctx: Context,
@@ -157,6 +158,7 @@ pub trait DynFileSystem: Send + Sync {
     }
 
     /// Create and open a file.
+    #[allow(clippy::too_many_arguments)]
     fn create(
         &self,
         ctx: Context,
@@ -171,6 +173,7 @@ pub trait DynFileSystem: Send + Sync {
     }
 
     /// Read data from a file.
+    #[allow(clippy::too_many_arguments)]
     fn read(
         &self,
         ctx: Context,
@@ -186,6 +189,7 @@ pub trait DynFileSystem: Send + Sync {
     }
 
     /// Write data to a file.
+    #[allow(clippy::too_many_arguments)]
     fn write(
         &self,
         ctx: Context,
@@ -226,6 +230,7 @@ pub trait DynFileSystem: Send + Sync {
     }
 
     /// Release an open file.
+    #[allow(clippy::too_many_arguments)]
     fn release(
         &self,
         ctx: Context,
@@ -349,6 +354,7 @@ pub trait DynFileSystem: Send + Sync {
     }
 
     /// Copy a range of data from one file to another.
+    #[allow(clippy::too_many_arguments)]
     fn copyfilerange(
         &self,
         ctx: Context,
@@ -365,6 +371,7 @@ pub trait DynFileSystem: Send + Sync {
     }
 
     /// Setup a mapping for DAX.
+    #[allow(clippy::too_many_arguments)]
     fn setupmapping(
         &self,
         ctx: Context,
@@ -394,6 +401,7 @@ pub trait DynFileSystem: Send + Sync {
     }
 
     /// Perform an ioctl on a file.
+    #[allow(clippy::too_many_arguments)]
     fn ioctl(
         &self,
         ctx: Context,
@@ -517,6 +525,7 @@ impl FileSystem for DynFileSystemAdapter {
         self.0.symlink(ctx, linkname, parent, name, extensions)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn mknod(
         &self,
         ctx: Context,
@@ -577,6 +586,7 @@ impl FileSystem for DynFileSystemAdapter {
         self.0.open(ctx, inode, flags)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create(
         &self,
         ctx: Context,
@@ -592,6 +602,7 @@ impl FileSystem for DynFileSystemAdapter {
             .create(ctx, parent, name, mode, flags, umask, extensions)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn read<W: io::Write + ZeroCopyWriter>(
         &self,
         ctx: Context,
@@ -607,6 +618,7 @@ impl FileSystem for DynFileSystemAdapter {
             .read(ctx, inode, handle, &mut w, size, offset, lock_owner, flags)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn write<R: io::Read + ZeroCopyReader>(
         &self,
         ctx: Context,
@@ -654,6 +666,7 @@ impl FileSystem for DynFileSystemAdapter {
         self.0.fallocate(ctx, inode, handle, mode, offset, length)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn release(
         &self,
         ctx: Context,
@@ -779,6 +792,7 @@ impl FileSystem for DynFileSystemAdapter {
         self.0.lseek(ctx, inode, handle, offset, whence)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn copyfilerange(
         &self,
         ctx: Context,
@@ -796,6 +810,7 @@ impl FileSystem for DynFileSystemAdapter {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn setupmapping(
         &self,
         ctx: Context,
@@ -842,6 +857,7 @@ impl FileSystem for DynFileSystemAdapter {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn ioctl(
         &self,
         ctx: Context,
