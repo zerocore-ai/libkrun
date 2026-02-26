@@ -15,32 +15,32 @@ use vm_memory::GuestMemoryMmap;
 use super::super::{FsError, Queue};
 use super::defs::{HPQ_INDEX, REQ_INDEX};
 use super::descriptor_utils::{Reader, Writer};
-use super::passthrough::{self, PassthroughFs};
+use super::filesystem::FileSystem;
 use super::server::Server;
 use crate::virtio::{InterruptTransport, VirtioShmRegion};
 
-pub struct FsWorker {
+pub struct FsWorker<F: FileSystem + Sync + 'static> {
     queues: Vec<Queue>,
     queue_evts: Vec<Arc<EventFd>>,
     interrupt: InterruptTransport,
     mem: GuestMemoryMmap,
     shm_region: Option<VirtioShmRegion>,
-    server: Server<PassthroughFs>,
+    server: Server<F>,
     stop_fd: EventFd,
     exit_code: Arc<AtomicI32>,
     #[cfg(target_os = "macos")]
     map_sender: Option<Sender<WorkerMessage>>,
 }
 
-impl FsWorker {
+impl<F: FileSystem + Sync + Send + 'static> FsWorker<F> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        fs: F,
         queues: Vec<Queue>,
         queue_evts: Vec<Arc<EventFd>>,
         interrupt: InterruptTransport,
         mem: GuestMemoryMmap,
         shm_region: Option<VirtioShmRegion>,
-        passthrough_cfg: passthrough::Config,
         stop_fd: EventFd,
         exit_code: Arc<AtomicI32>,
         #[cfg(target_os = "macos")] map_sender: Option<Sender<WorkerMessage>>,
@@ -51,7 +51,7 @@ impl FsWorker {
             interrupt,
             mem,
             shm_region,
-            server: Server::new(PassthroughFs::new(passthrough_cfg).unwrap()),
+            server: Server::new(fs),
             stop_fd,
             exit_code,
             #[cfg(target_os = "macos")]

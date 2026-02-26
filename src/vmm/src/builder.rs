@@ -59,7 +59,7 @@ use crate::terminal::{term_restore_mode, term_set_raw_mode};
 #[cfg(feature = "blk")]
 use crate::vmm_config::block::BlockBuilder;
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
-use crate::vmm_config::fs::FsDeviceConfig;
+use crate::vmm_config::fs::{CustomFsDeviceConfig, FsDeviceConfig};
 use crate::vmm_config::kernel_cmdline::DEFAULT_KERNEL_CMDLINE;
 #[cfg(target_os = "linux")]
 use crate::vstate::KvmContext;
@@ -1038,6 +1038,17 @@ pub fn build_microvm(
         #[cfg(not(feature = "tee"))]
         export_table,
         intc.clone(),
+        exit_code.clone(),
+        #[cfg(target_os = "macos")]
+        _sender.clone(),
+    )?;
+    #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+    attach_custom_fs_devices(
+        &mut vmm,
+        &vm_resources.custom_fs,
+        &mut _shm_manager,
+        vm_resources.fs.len(),
+        intc.clone(),
         exit_code,
         #[cfg(target_os = "macos")]
         _sender,
@@ -1490,6 +1501,17 @@ pub fn create_guest_memory(
                 .map_err(StartMicrovmError::ShmCreate)?;
         }
     }
+    #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+    {
+        let offset = vm_resources.fs.len();
+        for (i, custom) in vm_resources.custom_fs.iter().enumerate() {
+            if let Some(shm_size) = custom.shm_size {
+                shm_manager
+                    .create_fs_region(offset + i, shm_size)
+                    .map_err(StartMicrovmError::ShmCreate)?;
+            }
+        }
+    }
     if vm_resources.gpu_virgl_flags.is_some() {
         let size = vm_resources.gpu_shm_size.unwrap_or(1 << 33);
         shm_manager
@@ -1917,6 +1939,55 @@ fn attach_fs_devices(
         fs.lock().unwrap().set_map_sender(map_sender.clone());
 
         // The device mutex mustn't be locked here otherwise it will deadlock.
+        attach_mmio_device(vmm, id, intc.clone(), fs).map_err(RegisterFsDevice)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+fn attach_custom_fs_devices(
+    vmm: &mut Vmm,
+    custom_fs_devs: &[CustomFsDeviceConfig],
+    shm_manager: &mut ShmManager,
+    index_offset: usize,
+    intc: IrqChip,
+    exit_code: Arc<AtomicI32>,
+    #[cfg(target_os = "macos")] map_sender: Sender<WorkerMessage>,
+) -> std::result::Result<(), StartMicrovmError> {
+    use self::StartMicrovmError::*;
+
+    for (i, config) in custom_fs_devs.iter().enumerate() {
+        let fs = Arc::new(Mutex::new(
+            devices::virtio::Fs::with_custom_backend(
+                config.fs_id.clone(),
+                Arc::clone(&config.backend),
+                exit_code.clone(),
+            )
+            .unwrap(),
+        ));
+
+        let id = format!(
+            "{}{}",
+            String::from(fs.lock().unwrap().id()),
+            index_offset + i
+        );
+
+        let shm_index = index_offset + i;
+        if let Some(shm_region) = shm_manager.fs_region(shm_index) {
+            fs.lock().unwrap().set_shm_region(VirtioShmRegion {
+                host_addr: vmm
+                    .guest_memory
+                    .get_host_address(shm_region.guest_addr)
+                    .map_err(StartMicrovmError::ShmHostAddr)? as u64,
+                guest_addr: shm_region.guest_addr.raw_value(),
+                size: shm_region.size,
+            });
+        }
+
+        #[cfg(target_os = "macos")]
+        fs.lock().unwrap().set_map_sender(map_sender.clone());
+
         attach_mmio_device(vmm, id, intc.clone(), fs).map_err(RegisterFsDevice)?;
     }
 

@@ -11,7 +11,7 @@ const QUEUE_SIZE: u16 = 1024;
 pub const NUM_QUEUES: usize = 2;
 pub static QUEUE_CONFIG: [QueueConfig; NUM_QUEUES] = [QueueConfig::new(QUEUE_SIZE); NUM_QUEUES];
 
-mod backend;
+pub mod backend;
 pub mod device;
 #[cfg(target_os = "linux")]
 mod tap;

@@ -1,4 +1,4 @@
-//! krun_api - Native Rust API for libkrun microVMs.
+//! msb_krun - Native Rust API for libkrun microVMs.
 //!
 //! This crate provides a builder-pattern API for creating and running microVMs
 //! using libkrun's VMM infrastructure.
@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use krun_api::{VmBuilder, Result};
+//! use msb_krun::{VmBuilder, Result};
 //!
 //! fn main() -> Result<()> {
 //!     let exit_code = VmBuilder::new()
@@ -33,11 +33,11 @@ pub mod backends;
 //--------------------------------------------------------------------------------------------------
 
 pub use api::builder::VmBuilder;
-pub use api::builders::{ConsoleBuilder, ExecBuilder, FsBuilder, KernelBuilder, MachineBuilder};
 #[cfg(feature = "blk")]
 pub use api::builders::DiskBuilder;
 #[cfg(feature = "net")]
 pub use api::builders::NetBuilder;
+pub use api::builders::{ConsoleBuilder, ExecBuilder, FsBuilder, KernelBuilder, MachineBuilder};
 pub use api::error::{BuildError, ConfigError, Error, Result, RuntimeError};
 pub use api::vm::Vm;
 

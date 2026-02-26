@@ -8,9 +8,12 @@ use msb_krun::{Result, VmBuilder};
 
 fn main() -> Result<()> {
     // Create a simple VM that runs /bin/sh
-    let exit_code = VmBuilder::new()
-        .machine(|m| m.vcpus(2).memory_mib(1024))
-        .fs(|fs| fs.root("/")) // Share host root as guest root
+    let builder = VmBuilder::new().machine(|m| m.vcpus(2).memory_mib(1024));
+
+    #[cfg(not(feature = "tee"))]
+    let builder = builder.fs(|fs| fs.root("/")); // Share host root as guest root
+
+    let exit_code = builder
         .exec(|e| {
             e.path("/bin/echo")
                 .args(["Hello from libkrun VM!"])

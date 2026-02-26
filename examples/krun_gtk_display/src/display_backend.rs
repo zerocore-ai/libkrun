@@ -1,10 +1,10 @@
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 use gtk::{gdk::MemoryFormat, glib::Bytes};
-use krun_display::{
+use log::error;
+use msb_krun_display::{
     DisplayBackendBasicFramebuffer, DisplayBackendError, DisplayBackendNew, MAX_DISPLAYS, Rect,
     ResourceFormat,
 };
-use log::error;
 use std::mem;
 use utils::pollable_channel::PollableChannelSender;
 
