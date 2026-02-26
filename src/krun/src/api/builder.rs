@@ -33,7 +33,7 @@ use super::vm::Vm;
 /// # Example
 ///
 /// ```rust,no_run
-/// use krun_api::VmBuilder;
+/// use msb_krun::VmBuilder;
 ///
 /// let vm = VmBuilder::new()
 ///     .machine(|m| m.vcpus(4).memory_mib(2048))
@@ -86,7 +86,7 @@ impl VmBuilder {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use krun_api::VmBuilder;
+    /// # use msb_krun::VmBuilder;
     /// VmBuilder::new()
     ///     .machine(|m| m.vcpus(4).memory_mib(2048).nested_virt(true));
     /// ```
@@ -100,7 +100,7 @@ impl VmBuilder {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use krun_api::VmBuilder;
+    /// # use msb_krun::VmBuilder;
     /// VmBuilder::new()
     ///     .kernel(|k| k.cmdline("console=hvc0 debug"));
     /// ```
@@ -116,7 +116,7 @@ impl VmBuilder {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use krun_api::VmBuilder;
+    /// # use msb_krun::VmBuilder;
     /// VmBuilder::new()
     ///     .fs(|fs| fs.root("/path/to/rootfs"))
     ///     .fs(|fs| fs.tag("data").path("/host/data"));
@@ -135,7 +135,7 @@ impl VmBuilder {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use krun_api::VmBuilder;
+    /// # use msb_krun::VmBuilder;
     /// // VmBuilder::new()
     /// //     .net(|n| n.mac([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]).custom(my_backend));
     /// ```
@@ -153,7 +153,7 @@ impl VmBuilder {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use krun_api::VmBuilder;
+    /// # use msb_krun::VmBuilder;
     /// // VmBuilder::new()
     /// //     .disk(|d| d.path("/path/to/disk.img").read_only(true));
     /// ```
@@ -169,7 +169,7 @@ impl VmBuilder {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use krun_api::VmBuilder;
+    /// # use msb_krun::VmBuilder;
     /// VmBuilder::new()
     ///     .console(|c| c.output("/tmp/vm.log"));
     /// ```
@@ -183,7 +183,7 @@ impl VmBuilder {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use krun_api::VmBuilder;
+    /// # use msb_krun::VmBuilder;
     /// VmBuilder::new()
     ///     .exec(|e| e
     ///         .path("/bin/myapp")

@@ -1,6 +1,6 @@
 use crate::input_constants::*;
 use crate::{TouchScreenOptions, input_constants};
-use krun_input::{
+use msb_krun_input::{
     InputAbsInfo, InputBackendError, InputDeviceIds, InputEvent as KrunInputEvent, InputEventType,
     InputEventsImpl, InputQueryConfig, ObjectNew, write_bitmap,
 };

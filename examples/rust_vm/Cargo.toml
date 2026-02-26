@@ -3,5 +3,10 @@ name = "rust_vm"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+tee = ["msb_krun/tee"]
+amd-sev = ["tee", "msb_krun/amd-sev"]
+tdx = ["tee", "msb_krun/tdx"]
+
 [dependencies]
 msb_krun = { path = "../../src/krun" }

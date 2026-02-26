@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use krun_api::{VmBuilder, Result};
+//! use msb_krun::{VmBuilder, Result};
 //!
 //! fn main() -> Result<()> {
 //!     let exit_code = VmBuilder::new()
