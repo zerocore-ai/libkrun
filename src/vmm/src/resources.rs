@@ -413,6 +413,8 @@ mod tests {
             kernel_bundle: Default::default(),
             external_kernel: None,
             fs: Default::default(),
+            #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+            custom_fs: Default::default(),
             vsock: Default::default(),
             #[cfg(feature = "net")]
             net_builder: Default::default(),

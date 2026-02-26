@@ -45,6 +45,7 @@ use super::vm::Vm;
 pub struct VmBuilder {
     machine: MachineBuilder,
     kernel: KernelBuilder,
+    #[cfg_attr(feature = "tee", allow(dead_code))]
     fs: FsBuilder,
     console: ConsoleBuilder,
     exec: ExecBuilder,
