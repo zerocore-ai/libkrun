@@ -1,9 +1,11 @@
 [package]
-name = "polly"
-version = "0.0.1"
+name = "msb_krun_polly"
+version = "0.1.0"
 authors = ["Amazon Firecracker team <firecracker-devel@amazon.com>"]
 edition = "2021"
+license = "Apache-2.0"
+description = "Event polling abstraction for msb_krun microVMs"
 
 [dependencies]
 libc = ">=0.2.39"
-utils = { path="../utils" }
+utils = { package = "msb_krun_utils", path = "../utils" }

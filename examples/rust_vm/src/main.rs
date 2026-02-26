@@ -4,7 +4,7 @@
 //! - libkrunfw installed (provides the kernel)
 //! - A rootfs with /init.krun or specify your own executable
 
-use krun_api::{Result, VmBuilder};
+use msb_krun::{Result, VmBuilder};
 
 fn main() -> Result<()> {
     // Create a simple VM that runs /bin/sh

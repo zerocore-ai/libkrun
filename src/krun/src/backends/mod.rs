@@ -17,7 +17,7 @@
 // Modules
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(not(any(feature = "tee", feature = "nitro")))]
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 pub mod fs;
 
 #[cfg(feature = "net")]
@@ -27,7 +27,7 @@ pub mod net;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(not(any(feature = "tee", feature = "nitro")))]
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 pub use fs::DynFileSystem;
 
 #[cfg(feature = "net")]

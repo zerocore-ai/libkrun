@@ -1,7 +1,9 @@
 [package]
-name = "arch_gen"
+name = "msb_krun_arch_gen"
 version = "0.1.0"
 authors = ["Amazon Firecracker team <firecracker-devel@amazon.com>"]
 edition = "2021"
+license = "Apache-2.0 AND BSD-3-Clause"
+description = "Generated architecture definitions for msb_krun microVMs"
 
 [dependencies]

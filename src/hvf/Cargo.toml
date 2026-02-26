@@ -1,12 +1,14 @@
 [package]
-name = "hvf"
+name = "msb_krun_hvf"
 version = "0.1.0"
 authors = ["Sergio Lopez <slp@sinrega.org>"]
 edition = "2021"
+license = "Apache-2.0"
+description = "Apple Hypervisor.framework backend for msb_krun microVMs"
 
 [dependencies]
 crossbeam-channel = ">=0.5.15"
 libloading = "0.8"
 log = "0.4.0"
 
-arch = { path = "../arch" }
+arch = { package = "msb_krun_arch", path = "../arch" }

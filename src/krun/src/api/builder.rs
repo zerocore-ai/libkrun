@@ -7,7 +7,7 @@ use vmm::vmm_config::machine_config::VmConfig;
 use vmm::vmm_config::fs::FsDeviceConfig;
 
 use super::builders::{ConsoleBuilder, ExecBuilder, FsBuilder, KernelBuilder, MachineBuilder};
-#[cfg(not(any(feature = "tee", feature = "nitro")))]
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use super::builders::FsConfig;
 #[cfg(feature = "blk")]
 use super::builders::DiskBuilder;
@@ -230,10 +230,11 @@ impl VmBuilder {
                         fs_id: tag.clone(),
                         shared_dir: path.to_string_lossy().to_string(),
                         shm_size: *shm_size,
+                        allow_root_dir_delete: false,
                     };
                     vmr.fs.push(fs_config);
                 }
-                #[cfg(not(any(feature = "tee", feature = "nitro")))]
+                #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
                 FsConfig::Custom { tag: _, backend: _ } => {
                     // TODO: Custom filesystem backends require vmm modifications
                     // For now, we track them but can't wire them up yet
