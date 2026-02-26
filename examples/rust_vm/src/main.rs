@@ -8,8 +8,7 @@ use msb_krun::{Result, VmBuilder};
 
 fn main() -> Result<()> {
     // Create a simple VM that runs /bin/sh
-    let builder = VmBuilder::new()
-        .machine(|m| m.vcpus(2).memory_mib(1024));
+    let builder = VmBuilder::new().machine(|m| m.vcpus(2).memory_mib(1024));
 
     #[cfg(not(feature = "tee"))]
     let builder = builder.fs(|fs| fs.root("/")); // Share host root as guest root
