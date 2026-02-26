@@ -1,9 +1,11 @@
 [package]
-name = "kernel"
+name = "msb_krun_kernel"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0 AND BSD-3-Clause"
+description = "Kernel loading utilities for msb_krun microVMs"
 
 [dependencies]
 vm-memory = { version = ">=0.13", features = ["backend-mmap"] }
 
-utils = { path = "../utils" }
+utils = { package = "msb_krun_utils", path = "../utils" }

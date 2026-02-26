@@ -1,8 +1,10 @@
 [package]
-name = "utils"
+name = "msb_krun_utils"
 version = "0.1.0"
 authors = ["Amazon Firecracker team <firecracker-devel@amazon.com>"]
 edition = "2021"
+license = "Apache-2.0 AND BSD-3-Clause"
+description = "Shared utilities for msb_krun microVMs"
 
 [dependencies]
 bitflags = "1.2.0"

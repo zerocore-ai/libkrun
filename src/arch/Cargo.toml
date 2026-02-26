@@ -1,8 +1,10 @@
 [package]
-name = "arch"
+name = "msb_krun_arch"
 version = "0.1.0"
 authors = ["The Chromium OS Authors"]
 edition = "2021"
+license = "Apache-2.0 AND BSD-3-Clause"
+description = "Architecture-specific support for msb_krun microVMs"
 
 [features]
 tee = []
@@ -15,9 +17,9 @@ libc = ">=0.2.39"
 vm-memory = { version = ">=0.13", features = ["backend-mmap"] }
 vmm-sys-util = ">= 0.14"
 
-arch_gen = { path = "../arch_gen" }
-smbios = { path = "../smbios" }
-utils = { path = "../utils" }
+arch_gen = { package = "msb_krun_arch_gen", path = "../arch_gen" }
+smbios = { package = "msb_krun_smbios", path = "../smbios" }
+utils = { package = "msb_krun_utils", path = "../utils" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 kvm-bindings = { version = ">=0.11", features = ["fam-wrappers"] }
@@ -25,4 +27,4 @@ kvm-ioctls = ">=0.21"
 tdx = { version = "0.1.0", optional = true }
 
 [dev-dependencies]
-utils = { path = "../utils" }
+utils = { package = "msb_krun_utils", path = "../utils" }

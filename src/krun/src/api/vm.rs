@@ -188,34 +188,37 @@ impl Vm {
 
     /// Configure vsock device.
     fn configure_vsock(&mut self) -> Result<()> {
-        let mut vsock_config = VsockDeviceConfig {
-            vsock_id: "vsock0".to_string(),
-            guest_cid: 3,
-            host_port_map: None,
-            unix_ipc_port_map: None,
-            enable_tsi: false,
-            enable_tsi_unix: false,
-        };
+        use devices::virtio::TsiFlags;
+
+        let mut tsi_flags = TsiFlags::empty();
 
         // Enable TSI if no virtio-net configured
         #[cfg(feature = "net")]
         if self.vmr.net.list.is_empty() {
-            vsock_config.enable_tsi = true;
+            tsi_flags |= TsiFlags::HIJACK_INET;
         }
 
         #[cfg(not(feature = "net"))]
         {
-            vsock_config.enable_tsi = true;
+            tsi_flags |= TsiFlags::HIJACK_INET;
         }
 
         // Enable TSI for AF_UNIX if single root virtio-fs
         #[cfg(not(feature = "tee"))]
-        if vsock_config.enable_tsi
+        if tsi_flags.contains(TsiFlags::HIJACK_INET)
             && self.vmr.fs.len() == 1
             && self.vmr.fs[0].shared_dir == "/"
         {
-            vsock_config.enable_tsi_unix = true;
+            tsi_flags |= TsiFlags::HIJACK_UNIX;
         }
+
+        let vsock_config = VsockDeviceConfig {
+            vsock_id: "vsock0".to_string(),
+            guest_cid: 3,
+            host_port_map: None,
+            unix_ipc_port_map: None,
+            tsi_flags,
+        };
 
         self.vmr
             .set_vsock_device(vsock_config)

@@ -1,5 +1,5 @@
 [package]
-name = "krun_api"
+name = "msb_krun"
 version = "0.1.0"
 authors = ["The libkrun Authors"]
 edition = "2021"
@@ -14,7 +14,7 @@ blk = []
 gpu = ["krun_display"]
 snd = []
 tee = []
-nitro = ["dep:nitro", "dep:nitro-enclaves"]
+aws-nitro = ["dep:aws-nitro", "dep:nitro-enclaves"]
 amd-sev = ["blk", "tee"]
 tdx = ["blk", "tee"]
 efi = ["blk", "net"]
@@ -26,21 +26,21 @@ libc = ">=0.2.39"
 libloading = "0.8"
 log = "0.4.0"
 
-devices = { path = "../devices" }
-polly = { path = "../polly" }
-utils = { path = "../utils" }
-vmm = { path = "../vmm" }
+devices = { package = "msb_krun_devices", path = "../devices" }
+polly = { package = "msb_krun_polly", path = "../polly" }
+utils = { package = "msb_krun_utils", path = "../utils" }
+vmm = { package = "msb_krun_vmm", path = "../vmm" }
 
 # Optional dependencies
-krun_display = { path = "../krun_display", optional = true, features = ["bindgen_clang_runtime"] }
-krun_input = { path = "../krun_input", optional = true, features = ["bindgen_clang_runtime"] }
+krun_display = { package = "msb_krun_display", path = "../krun_display", optional = true, features = ["bindgen_clang_runtime"] }
+krun_input = { package = "msb_krun_input", path = "../krun_input", optional = true, features = ["bindgen_clang_runtime"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-hvf = { path = "../hvf" }
+hvf = { package = "msb_krun_hvf", path = "../hvf" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 kvm-bindings = { version = ">=0.11", features = ["fam-wrappers"] }
 kvm-ioctls = ">=0.21"
 vm-memory = { version = ">=0.13", features = ["backend-mmap"] }
-nitro = { path = "../nitro", optional = true }
-nitro-enclaves = { version = "0.5.0", optional = true }
+aws-nitro = { package = "msb_krun_aws_nitro", path = "../aws_nitro", optional = true }
+nitro-enclaves = { version = "0.6.0", optional = true }

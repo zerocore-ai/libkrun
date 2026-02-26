@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-#[cfg(not(any(feature = "tee", feature = "nitro")))]
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use crate::backends::fs::DynFileSystem;
 
 #[cfg(feature = "net")]
@@ -51,7 +51,7 @@ pub enum FsConfig {
         shm_size: Option<usize>,
     },
     /// Custom filesystem backend.
-    #[cfg(not(any(feature = "tee", feature = "nitro")))]
+    #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
     Custom {
         tag: String,
         backend: Box<dyn DynFileSystem + Send + Sync>,
@@ -255,7 +255,7 @@ impl FsBuilder {
     }
 
     /// Use a custom filesystem backend.
-    #[cfg(not(any(feature = "tee", feature = "nitro")))]
+    #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
     pub fn custom(mut self, backend: Box<dyn DynFileSystem + Send + Sync>) -> Self {
         let tag = self
             .current_tag

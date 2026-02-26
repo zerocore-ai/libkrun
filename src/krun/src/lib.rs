@@ -41,7 +41,7 @@ pub use api::builders::NetBuilder;
 pub use api::error::{BuildError, ConfigError, Error, Result, RuntimeError};
 pub use api::vm::Vm;
 
-#[cfg(not(any(feature = "tee", feature = "nitro")))]
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 pub use backends::fs::DynFileSystem;
 
 #[cfg(feature = "net")]
