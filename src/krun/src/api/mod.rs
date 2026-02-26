@@ -35,10 +35,10 @@ pub mod vm;
 //--------------------------------------------------------------------------------------------------
 
 pub use builder::VmBuilder;
-pub use builders::{ConsoleBuilder, ExecBuilder, FsBuilder, KernelBuilder, MachineBuilder};
 #[cfg(feature = "blk")]
 pub use builders::DiskBuilder;
 #[cfg(feature = "net")]
 pub use builders::NetBuilder;
+pub use builders::{ConsoleBuilder, ExecBuilder, FsBuilder, KernelBuilder, MachineBuilder};
 pub use error::{BuildError, ConfigError, Error, Result, RuntimeError};
 pub use vm::Vm;

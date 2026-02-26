@@ -6,18 +6,18 @@ use std::sync::Arc;
 use vmm::resources::VmResources;
 use vmm::vmm_config::machine_config::VmConfig;
 
-#[cfg(not(feature = "tee"))]
-use vmm::vmm_config::fs::FsDeviceConfig;
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use vmm::vmm_config::fs::CustomFsDeviceConfig;
+#[cfg(not(feature = "tee"))]
+use vmm::vmm_config::fs::FsDeviceConfig;
 
-use super::builders::{ConsoleBuilder, ExecBuilder, FsBuilder, KernelBuilder, MachineBuilder};
-#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
-use super::builders::FsConfig;
 #[cfg(feature = "blk")]
 use super::builders::DiskBuilder;
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+use super::builders::FsConfig;
 #[cfg(feature = "net")]
 use super::builders::NetBuilder;
+use super::builders::{ConsoleBuilder, ExecBuilder, FsBuilder, KernelBuilder, MachineBuilder};
 
 use super::error::{ConfigError, Error, Result};
 use super::vm::Vm;
@@ -230,7 +230,11 @@ impl VmBuilder {
         #[cfg(not(feature = "tee"))]
         for config in self.fs.configs {
             match config {
-                FsConfig::Path { tag, path, shm_size } => {
+                FsConfig::Path {
+                    tag,
+                    path,
+                    shm_size,
+                } => {
                     let fs_config = FsDeviceConfig {
                         fs_id: tag,
                         shared_dir: path.to_string_lossy().to_string(),

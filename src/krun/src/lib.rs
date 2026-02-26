@@ -33,11 +33,11 @@ pub mod backends;
 //--------------------------------------------------------------------------------------------------
 
 pub use api::builder::VmBuilder;
-pub use api::builders::{ConsoleBuilder, ExecBuilder, FsBuilder, KernelBuilder, MachineBuilder};
 #[cfg(feature = "blk")]
 pub use api::builders::DiskBuilder;
 #[cfg(feature = "net")]
 pub use api::builders::NetBuilder;
+pub use api::builders::{ConsoleBuilder, ExecBuilder, FsBuilder, KernelBuilder, MachineBuilder};
 pub use api::error::{BuildError, ConfigError, Error, Result, RuntimeError};
 pub use api::vm::Vm;
 

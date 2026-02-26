@@ -1967,7 +1967,11 @@ fn attach_custom_fs_devices(
             .unwrap(),
         ));
 
-        let id = format!("{}{}", String::from(fs.lock().unwrap().id()), index_offset + i);
+        let id = format!(
+            "{}{}",
+            String::from(fs.lock().unwrap().id()),
+            index_offset + i
+        );
 
         let shm_index = index_offset + i;
         if let Some(shm_region) = shm_manager.fs_region(shm_index) {

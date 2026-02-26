@@ -289,8 +289,7 @@ impl Vm {
 
 /// Bindings to libkrunfw functions.
 struct KrunfwBindings {
-    get_kernel:
-        unsafe extern "C" fn(*mut u64, *mut u64, *mut usize) -> *mut std::ffi::c_char,
+    get_kernel: unsafe extern "C" fn(*mut u64, *mut u64, *mut usize) -> *mut std::ffi::c_char,
     #[allow(dead_code)]
     _library: libloading::Library,
 }

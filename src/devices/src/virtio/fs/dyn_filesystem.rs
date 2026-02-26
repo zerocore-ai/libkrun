@@ -527,7 +527,8 @@ impl FileSystem for DynFileSystemAdapter {
         umask: u32,
         extensions: Extensions,
     ) -> io::Result<Entry> {
-        self.0.mknod(ctx, inode, name, mode, rdev, umask, extensions)
+        self.0
+            .mknod(ctx, inode, name, mode, rdev, umask, extensions)
     }
 
     fn mkdir(
@@ -650,8 +651,7 @@ impl FileSystem for DynFileSystemAdapter {
         offset: u64,
         length: u64,
     ) -> io::Result<()> {
-        self.0
-            .fallocate(ctx, inode, handle, mode, offset, length)
+        self.0.fallocate(ctx, inode, handle, mode, offset, length)
     }
 
     fn release(
@@ -854,8 +854,9 @@ impl FileSystem for DynFileSystemAdapter {
         out_size: u32,
         exit_code: &Arc<AtomicI32>,
     ) -> io::Result<Vec<u8>> {
-        self.0
-            .ioctl(ctx, inode, handle, flags, cmd, arg, in_size, out_size, exit_code)
+        self.0.ioctl(
+            ctx, inode, handle, flags, cmd, arg, in_size, out_size, exit_code,
+        )
     }
 
     fn getlk(&self) -> io::Result<()> {
