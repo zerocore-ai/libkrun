@@ -145,9 +145,8 @@ impl Vm {
         // Build the microVM
         let (sender, _receiver) = unbounded();
 
-        let _vmm =
-            vmm::builder::build_microvm(&self.vmr, &mut event_manager, shutdown_efd, sender)
-                .map_err(|e| Error::Build(BuildError::Start(format!("build_microvm: {e:?}"))))?;
+        let _vmm = vmm::builder::build_microvm(&self.vmr, &mut event_manager, shutdown_efd, sender)
+            .map_err(|e| Error::Build(BuildError::Start(format!("build_microvm: {e:?}"))))?;
 
         // Start worker threads if needed
         #[cfg(target_os = "macos")]

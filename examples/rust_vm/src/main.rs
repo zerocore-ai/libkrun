@@ -23,10 +23,14 @@ fn main() -> Result<()> {
 
     eprintln!("Entering VM (rootfs={rootfs_path})");
 
-    VmBuilder::new()
+    let builder = VmBuilder::new()
         .machine(|m| m.vcpus(2).memory_mib(1024))
-        .kernel(|k| k.krunfw_path(&krunfw_path))
-        .fs(|fs| fs.root(&rootfs_path))
+        .kernel(|k| k.krunfw_path(&krunfw_path));
+
+    #[cfg(not(feature = "tee"))]
+    let builder = builder.fs(|fs| fs.root(&rootfs_path));
+
+    builder
         .exec(|e| {
             e.path("/bin/echo")
                 .args(["Hello from libkrun VM!"])
