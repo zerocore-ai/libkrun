@@ -14,7 +14,7 @@ nix = { version = "0.30", features = ["poll"] }
 tar = "0.4"
 vsock = "0.5"
 
-devices = { package = "msb_krun_devices", path = "../devices" }
+devices = { package = "msb_krun_devices", version = "0.1.0", path = "../devices" }
 log = "0.4"
 signal-hook = "0.3"
 

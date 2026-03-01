@@ -88,7 +88,12 @@ impl VmBuilder {
     /// ```rust,no_run
     /// # use msb_krun::VmBuilder;
     /// VmBuilder::new()
-    ///     .machine(|m| m.vcpus(4).memory_mib(2048).nested_virt(true));
+    ///     .machine(|m| {
+    ///         m.vcpus(4)
+    ///             .memory_mib(2048)
+    ///             .hyperthreading(true)
+    ///             .nested_virt(true)
+    ///     });
     /// ```
     pub fn machine(mut self, f: impl FnOnce(MachineBuilder) -> MachineBuilder) -> Self {
         self.machine = f(self.machine);
@@ -102,7 +107,10 @@ impl VmBuilder {
     /// ```rust,no_run
     /// # use msb_krun::VmBuilder;
     /// VmBuilder::new()
-    ///     .kernel(|k| k.cmdline("console=hvc0 debug"));
+    ///     .kernel(|k| {
+    ///         k.krunfw_path("/path/to/libkrunfw.dylib")
+    ///             .cmdline("debug")
+    ///     });
     /// ```
     pub fn kernel(mut self, f: impl FnOnce(KernelBuilder) -> KernelBuilder) -> Self {
         self.kernel = f(self.kernel);
@@ -113,13 +121,31 @@ impl VmBuilder {
     ///
     /// Can be called multiple times to add multiple mounts.
     ///
-    /// # Example
+    /// # Examples
+    ///
+    /// Root filesystem only:
+    ///
+    /// ```rust,no_run
+    /// # use msb_krun::VmBuilder;
+    /// VmBuilder::new()
+    ///     .fs(|fs| fs.root("/path/to/rootfs"));
+    /// ```
+    ///
+    /// Root filesystem with additional named mounts:
     ///
     /// ```rust,no_run
     /// # use msb_krun::VmBuilder;
     /// VmBuilder::new()
     ///     .fs(|fs| fs.root("/path/to/rootfs"))
-    ///     .fs(|fs| fs.tag("data").path("/host/data"));
+    ///     .fs(|fs| fs.tag("data").shm_size(1 << 30).path("/host/data"))
+    ///     .fs(|fs| fs.tag("logs").path("/host/logs"));
+    /// ```
+    ///
+    /// Custom filesystem backend:
+    ///
+    /// ```rust,ignore
+    /// VmBuilder::new()
+    ///     .fs(|fs| fs.tag("myfs").custom(Box::new(my_backend)));
     /// ```
     #[cfg(not(feature = "tee"))]
     pub fn fs(mut self, f: impl FnOnce(FsBuilder) -> FsBuilder) -> Self {
@@ -134,10 +160,9 @@ impl VmBuilder {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use msb_krun::VmBuilder;
-    /// // VmBuilder::new()
-    /// //     .net(|n| n.mac([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]).custom(my_backend));
+    /// ```rust,ignore
+    /// VmBuilder::new()
+    ///     .net(|n| n.mac([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]).custom(my_backend));
     /// ```
     #[cfg(feature = "net")]
     pub fn net(mut self, f: impl FnOnce(NetBuilder) -> NetBuilder) -> Self {
@@ -154,8 +179,8 @@ impl VmBuilder {
     ///
     /// ```rust,no_run
     /// # use msb_krun::VmBuilder;
-    /// // VmBuilder::new()
-    /// //     .disk(|d| d.path("/path/to/disk.img").read_only(true));
+    /// VmBuilder::new()
+    ///     .disk(|d| d.path("/path/to/disk.img").read_only(true));
     /// ```
     #[cfg(feature = "blk")]
     pub fn disk(mut self, f: impl FnOnce(DiskBuilder) -> DiskBuilder) -> Self {
@@ -173,6 +198,18 @@ impl VmBuilder {
     /// VmBuilder::new()
     ///     .console(|c| c.output("/tmp/vm.log"));
     /// ```
+    ///
+    /// With the `gpu` and `snd` features:
+    ///
+    /// ```rust,ignore
+    /// VmBuilder::new()
+    ///     .console(|c| {
+    ///         c.output("/tmp/vm.log")
+    ///             .sound(true)
+    ///             .gpu_virgl_flags(0x1)
+    ///             .gpu_shm_size(1 << 28)
+    ///     });
+    /// ```
     pub fn console(mut self, f: impl FnOnce(ConsoleBuilder) -> ConsoleBuilder) -> Self {
         self.console = f(self.console);
         self
@@ -180,18 +217,34 @@ impl VmBuilder {
 
     /// Configure execution settings.
     ///
-    /// # Example
+    /// # Examples
+    ///
+    /// Setting environment variables one at a time with `.env()`:
     ///
     /// ```rust,no_run
     /// # use msb_krun::VmBuilder;
     /// VmBuilder::new()
-    ///     .exec(|e| e
-    ///         .path("/bin/myapp")
-    ///         .args(["--flag", "value"])
-    ///         .env("HOME", "/root")
-    ///         .workdir("/app")
-    ///         .uid(1000)
-    ///         .gid(1000));
+    ///     .exec(|e| {
+    ///         e.path("/bin/myapp")
+    ///             .args(["--flag", "value"])
+    ///             .env("HOME", "/root")
+    ///             .env("LANG", "en_US.UTF-8")
+    ///             .workdir("/app")
+    ///             .uid(1000)
+    ///             .gid(1000)
+    ///             .rlimit("NOFILE", 1024, 4096)
+    ///     });
+    /// ```
+    ///
+    /// Setting environment variables in bulk with `.envs()`:
+    ///
+    /// ```rust,no_run
+    /// # use msb_krun::VmBuilder;
+    /// VmBuilder::new()
+    ///     .exec(|e| {
+    ///         e.path("/bin/myapp")
+    ///             .envs([("HOME", "/root"), ("LANG", "en_US.UTF-8")])
+    ///     });
     /// ```
     pub fn exec(mut self, f: impl FnOnce(ExecBuilder) -> ExecBuilder) -> Self {
         self.exec = f(self.exec);
@@ -325,6 +378,7 @@ impl VmBuilder {
             rlimits,
             self.exec.uid,
             self.exec.gid,
+            self.kernel.krunfw_path,
         ))
     }
 }

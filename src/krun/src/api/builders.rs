@@ -13,6 +13,19 @@ use crate::backends::net::NetBackend;
 //--------------------------------------------------------------------------------------------------
 
 /// Builder for machine configuration (vCPUs, memory, etc.).
+///
+/// # Example
+///
+/// ```rust,no_run
+/// # use msb_krun::VmBuilder;
+/// VmBuilder::new()
+///     .machine(|m| {
+///         m.vcpus(4)
+///             .memory_mib(2048)
+///             .hyperthreading(true)
+///             .nested_virt(true)
+///     });
+/// ```
 #[derive(Debug, Clone)]
 pub struct MachineBuilder {
     pub(crate) vcpus: u8,
@@ -26,9 +39,21 @@ pub struct MachineBuilder {
 //--------------------------------------------------------------------------------------------------
 
 /// Builder for kernel configuration.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// # use msb_krun::VmBuilder;
+/// VmBuilder::new()
+///     .kernel(|k| {
+///         k.krunfw_path("/path/to/libkrunfw.dylib")
+///             .cmdline("debug")
+///     });
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct KernelBuilder {
     pub(crate) cmdline: Option<String>,
+    pub(crate) krunfw_path: Option<PathBuf>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -36,6 +61,33 @@ pub struct KernelBuilder {
 //--------------------------------------------------------------------------------------------------
 
 /// Builder for filesystem configuration.
+///
+/// # Examples
+///
+/// Root filesystem only:
+///
+/// ```rust,no_run
+/// # use msb_krun::VmBuilder;
+/// VmBuilder::new()
+///     .fs(|fs| fs.root("/path/to/rootfs"));
+/// ```
+///
+/// Root filesystem with additional named mounts:
+///
+/// ```rust,no_run
+/// # use msb_krun::VmBuilder;
+/// VmBuilder::new()
+///     .fs(|fs| fs.root("/path/to/rootfs"))
+///     .fs(|fs| fs.tag("data").shm_size(1 << 30).path("/host/data"))
+///     .fs(|fs| fs.tag("logs").path("/host/logs"));
+/// ```
+///
+/// Custom filesystem backend:
+///
+/// ```rust,ignore
+/// VmBuilder::new()
+///     .fs(|fs| fs.tag("myfs").custom(Box::new(my_backend)));
+/// ```
 pub struct FsBuilder {
     pub(crate) configs: Vec<FsConfig>,
     current_tag: Option<String>,
@@ -63,6 +115,13 @@ pub enum FsConfig {
 //--------------------------------------------------------------------------------------------------
 
 /// Builder for network configuration.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// VmBuilder::new()
+///     .net(|n| n.mac([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]).custom(my_backend));
+/// ```
 #[cfg(feature = "net")]
 pub struct NetBuilder {
     pub(crate) configs: Vec<NetConfig>,
@@ -84,6 +143,26 @@ pub enum NetConfig {
 //--------------------------------------------------------------------------------------------------
 
 /// Builder for console/output configuration.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// # use msb_krun::VmBuilder;
+/// VmBuilder::new()
+///     .console(|c| c.output("/tmp/vm.log"));
+/// ```
+///
+/// With the `gpu` and `snd` features:
+///
+/// ```rust,ignore
+/// VmBuilder::new()
+///     .console(|c| {
+///         c.output("/tmp/vm.log")
+///             .sound(true)
+///             .gpu_virgl_flags(0x1)
+///             .gpu_shm_size(1 << 28)
+///     });
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct ConsoleBuilder {
     pub(crate) output: Option<PathBuf>,
@@ -100,6 +179,36 @@ pub struct ConsoleBuilder {
 //--------------------------------------------------------------------------------------------------
 
 /// Builder for execution configuration.
+///
+/// # Examples
+///
+/// Setting environment variables one at a time with `.env()`:
+///
+/// ```rust,no_run
+/// # use msb_krun::VmBuilder;
+/// VmBuilder::new()
+///     .exec(|e| {
+///         e.path("/bin/myapp")
+///             .args(["--flag", "value"])
+///             .env("HOME", "/root")
+///             .env("LANG", "en_US.UTF-8")
+///             .workdir("/app")
+///             .uid(1000)
+///             .gid(1000)
+///             .rlimit("NOFILE", 1024, 4096)
+///     });
+/// ```
+///
+/// Setting environment variables in bulk with `.envs()`:
+///
+/// ```rust,no_run
+/// # use msb_krun::VmBuilder;
+/// VmBuilder::new()
+///     .exec(|e| {
+///         e.path("/bin/myapp")
+///             .envs([("HOME", "/root"), ("LANG", "en_US.UTF-8")])
+///     });
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct ExecBuilder {
     pub(crate) path: Option<String>,
@@ -116,6 +225,14 @@ pub struct ExecBuilder {
 //--------------------------------------------------------------------------------------------------
 
 /// Builder for block device configuration.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// # use msb_krun::VmBuilder;
+/// VmBuilder::new()
+///     .disk(|d| d.path("/path/to/disk.img").read_only(true));
+/// ```
 #[cfg(feature = "blk")]
 #[derive(Debug, Clone, Default)]
 pub struct DiskBuilder {
@@ -198,6 +315,14 @@ impl KernelBuilder {
         }
         self
     }
+
+    /// Set an explicit path to the libkrunfw shared library.
+    ///
+    /// When not set, the OS dynamic linker's default search path is used.
+    pub fn krunfw_path(mut self, path: impl AsRef<Path>) -> Self {
+        self.krunfw_path = Some(path.as_ref().to_path_buf());
+        self
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -214,10 +339,12 @@ impl FsBuilder {
         }
     }
 
-    /// Set the root filesystem path (tag: "krun_root").
+    /// Set the root filesystem path.
+    ///
+    /// Uses the virtiofs tag `/dev/root`, matching the kernel's expected root device name.
     pub fn root(mut self, path: impl AsRef<Path>) -> Self {
         self.configs.push(FsConfig::Path {
-            tag: "krun_root".to_string(),
+            tag: "/dev/root".to_string(),
             path: path.as_ref().to_path_buf(),
             shm_size: None,
         });

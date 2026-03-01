@@ -1,7 +1,13 @@
 //! msb_krun - Native Rust API for libkrun microVMs.
 //!
-//! This crate provides a builder-pattern API for creating and running microVMs
+//! This crate provides a builder-pattern API for creating and entering microVMs
 //! using libkrun's VMM infrastructure.
+//!
+//! # Lifecycle
+//!
+//! [`Vm::enter()`] never returns on success. When the guest shuts down, the
+//! VMM calls `_exit()`, killing the entire process. `enter()` only returns
+//! `Err` if something fails before the VMM takes over.
 //!
 //! # Example
 //!
@@ -9,15 +15,14 @@
 //! use msb_krun::{VmBuilder, Result};
 //!
 //! fn main() -> Result<()> {
-//!     let exit_code = VmBuilder::new()
+//!     VmBuilder::new()
 //!         .machine(|m| m.vcpus(4).memory_mib(2048))
 //!         .fs(|fs| fs.root("/path/to/rootfs"))
 //!         .exec(|e| e.path("/bin/myapp").args(["--flag"]).env("HOME", "/root"))
 //!         .build()?
-//!         .run()?;
+//!         .enter()?;
 //!
-//!     println!("VM exited with code: {}", exit_code);
-//!     Ok(())
+//!     unreachable!()
 //! }
 //! ```
 

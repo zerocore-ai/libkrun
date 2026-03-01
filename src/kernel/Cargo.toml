@@ -8,4 +8,4 @@ description = "Kernel loading utilities for msb_krun microVMs"
 [dependencies]
 vm-memory = { version = ">=0.13", features = ["backend-mmap"] }
 
-utils = { package = "msb_krun_utils", path = "../utils" }
+utils = { package = "msb_krun_utils", version = "0.1.0", path = "../utils" }

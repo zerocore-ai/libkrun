@@ -1,0 +1,3 @@
+[submodule "examples/rust_vm/rootfs-alpine"]
+	path = examples/rust_vm/rootfs-alpine
+	url = https://github.com/zerocore-ai/rootfs-alpine

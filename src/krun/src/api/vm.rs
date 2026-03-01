@@ -1,4 +1,7 @@
-//! VM handle for running microVMs.
+//! VM handle for entering microVMs.
+
+use std::convert::Infallible;
+use std::path::PathBuf;
 
 #[cfg(target_os = "linux")]
 use std::env;
@@ -8,6 +11,7 @@ use std::ffi::CString;
 use crossbeam_channel::unbounded;
 use log::error;
 use polly::event_manager::EventManager;
+use utils::eventfd::EventFd;
 use vmm::resources::VmResources;
 use vmm::vmm_config::kernel_bundle::KernelBundle;
 use vmm::vmm_config::kernel_cmdline::KernelCmdlineConfig;
@@ -19,15 +23,15 @@ use super::error::{BuildError, Error, Result, RuntimeError};
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-const DEFAULT_KERNEL_CMDLINE: &str =
-    "reboot=k panic=-1 panic_print=0 nomodule console=hvc0 quiet 8250.nr_uarts=0";
 const INIT_PATH: &str = "/init.krun";
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Handle to a configured VM ready to run.
+/// Handle to a configured VM ready to enter.
+///
+/// Created via [`VmBuilder::build()`](super::builder::VmBuilder::build).
 pub struct Vm {
     vmr: VmResources,
     exec_path: Option<String>,
@@ -37,6 +41,9 @@ pub struct Vm {
     rlimits: Option<String>,
     uid: Option<u32>,
     gid: Option<u32>,
+    krunfw_path: Option<PathBuf>,
+    /// Keeps the libkrunfw library loaded so kernel memory pointers remain valid.
+    _krunfw_library: Option<libloading::Library>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -55,6 +62,7 @@ impl Vm {
         rlimits: Option<String>,
         uid: Option<u32>,
         gid: Option<u32>,
+        krunfw_path: Option<PathBuf>,
     ) -> Self {
         Self {
             vmr,
@@ -65,20 +73,16 @@ impl Vm {
             rlimits,
             uid,
             gid,
+            krunfw_path,
+            _krunfw_library: None,
         }
     }
 
-    /// Run the VM.
+    /// Start the VM. This call never returns on success — the VMM calls
+    /// `_exit()` when the guest shuts down, killing the entire process.
     ///
-    /// This method blocks until the VM exits. Returns the exit code on success.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The kernel cannot be loaded
-    /// - The VM fails to build
-    /// - The event loop encounters an error
-    pub fn run(mut self) -> Result<i32> {
+    /// Only returns `Err` if something fails before the VMM takes over.
+    pub fn enter(mut self) -> Result<Infallible> {
         // Set process name on Linux
         #[cfg(target_os = "linux")]
         {
@@ -104,7 +108,10 @@ impl Vm {
 
         // Build kernel command line
         let kernel_cmdline = KernelCmdlineConfig {
-            prolog: Some(format!("{DEFAULT_KERNEL_CMDLINE} init={INIT_PATH}")),
+            prolog: Some(format!(
+                "{} root=/dev/root init={INIT_PATH}",
+                vmm::vmm_config::kernel_cmdline::DEFAULT_KERNEL_CMDLINE,
+            )),
             krun_env: Some(format!(
                 " {} {} {} {}",
                 self.get_exec_path(),
@@ -125,10 +132,20 @@ impl Vm {
         // Set UID/GID if specified
         self.set_credentials()?;
 
+        // Create shutdown EventFd on macOS aarch64 (needed for GPIO shutdown device)
+        let shutdown_efd = if cfg!(target_arch = "aarch64") && cfg!(target_os = "macos") {
+            Some(
+                EventFd::new(utils::eventfd::EFD_NONBLOCK)
+                    .map_err(|e| Error::Build(BuildError::Start(format!("shutdown_efd: {e:?}"))))?,
+            )
+        } else {
+            None
+        };
+
         // Build the microVM
         let (sender, _receiver) = unbounded();
 
-        let _vmm = vmm::builder::build_microvm(&self.vmr, &mut event_manager, None, sender)
+        let _vmm = vmm::builder::build_microvm(&self.vmr, &mut event_manager, shutdown_efd, sender)
             .map_err(|e| Error::Build(BuildError::Start(format!("build_microvm: {e:?}"))))?;
 
         // Start worker threads if needed
@@ -148,7 +165,7 @@ impl Vm {
         vmm::worker::start_worker_thread(_vmm.clone(), _receiver.clone())
             .map_err(|e| Error::Runtime(RuntimeError::EventLoop(format!("{e:?}"))))?;
 
-        // Run the event loop
+        // Run the event loop. On normal guest exit, the VMM calls _exit() directly.
         loop {
             match event_manager.run() {
                 Ok(_) => {}
@@ -162,8 +179,7 @@ impl Vm {
 
     /// Load kernel from libkrunfw.
     fn load_krunfw(&mut self) -> Result<()> {
-        // Try to load libkrunfw
-        let krunfw = load_krunfw_library()?;
+        let krunfw = load_krunfw_library(self.krunfw_path.as_deref())?;
 
         // Get kernel from libkrunfw
         let mut kernel_guest_addr: u64 = 0;
@@ -188,6 +204,9 @@ impl Vm {
         self.vmr
             .set_kernel_bundle(kernel_bundle)
             .map_err(|e| Error::Build(BuildError::Krunfw(format!("{e:?}"))))?;
+
+        // Keep the library alive so the kernel memory pointers remain valid.
+        self._krunfw_library = Some(krunfw.library);
 
         Ok(())
     }
@@ -296,8 +315,7 @@ impl Vm {
 /// Bindings to libkrunfw functions.
 struct KrunfwBindings {
     get_kernel: unsafe extern "C" fn(*mut u64, *mut u64, *mut usize) -> *mut std::ffi::c_char,
-    #[allow(dead_code)]
-    _library: libloading::Library,
+    library: libloading::Library,
 }
 
 /// Library name for libkrunfw.
@@ -307,9 +325,19 @@ const KRUNFW_NAME: &str = "libkrunfw.so.5";
 const KRUNFW_NAME: &str = "libkrunfw.5.dylib";
 
 /// Load the libkrunfw library.
-fn load_krunfw_library() -> Result<KrunfwBindings> {
-    let library = unsafe { libloading::Library::new(KRUNFW_NAME) }
-        .map_err(|e| Error::Build(BuildError::Krunfw(format!("load {KRUNFW_NAME}: {e}"))))?;
+///
+/// If `path` is provided, loads from that exact path. Otherwise falls back to the
+/// default library name, which lets the OS dynamic linker search standard paths.
+fn load_krunfw_library(path: Option<&std::path::Path>) -> Result<KrunfwBindings> {
+    let name = path
+        .map(|p| p.as_os_str().to_os_string())
+        .unwrap_or_else(|| std::ffi::OsString::from(KRUNFW_NAME));
+    let library = unsafe { libloading::Library::new(&name) }.map_err(|e| {
+        Error::Build(BuildError::Krunfw(format!(
+            "load {}: {e}",
+            name.to_string_lossy()
+        )))
+    })?;
 
     let get_kernel = unsafe {
         *library
@@ -321,6 +349,6 @@ fn load_krunfw_library() -> Result<KrunfwBindings> {
 
     Ok(KrunfwBindings {
         get_kernel,
-        _library: library,
+        library,
     })
 }
