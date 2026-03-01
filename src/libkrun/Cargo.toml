@@ -3,6 +3,7 @@ name = "libkrun"
 version = "1.17.3"
 authors = ["The libkrun Authors"]
 edition = "2021"
+publish = false
 build = "build.rs"
 
 [features]

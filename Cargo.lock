@@ -1431,6 +1431,7 @@ dependencies = [
 name = "rust_vm"
 version = "0.1.0"
 dependencies = [
+ "env_logger",
  "msb_krun",
 ]
 

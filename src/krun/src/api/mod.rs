@@ -1,6 +1,6 @@
 //! Native Rust API for libkrun.
 //!
-//! This module provides a builder-pattern API for creating and running microVMs
+//! This module provides a builder-pattern API for creating and entering microVMs
 //! using nested builders for organized configuration.
 //!
 //! # Example
@@ -9,15 +9,17 @@
 //! use msb_krun::{VmBuilder, Result};
 //!
 //! fn main() -> Result<()> {
-//!     let exit_code = VmBuilder::new()
+//!     // enter() hands process lifecycle to the VMM.
+//!     // On normal guest exit, the process terminates directly.
+//!     // It only returns on early setup errors.
+//!     VmBuilder::new()
 //!         .machine(|m| m.vcpus(4).memory_mib(2048))
 //!         .fs(|fs| fs.root("/path/to/rootfs"))
 //!         .exec(|e| e.path("/bin/myapp").args(["--flag"]).env("HOME", "/root"))
 //!         .build()?
-//!         .run()?;
+//!         .enter()?;
 //!
-//!     println!("VM exited with code: {}", exit_code);
-//!     Ok(())
+//!     unreachable!()
 //! }
 //! ```
 

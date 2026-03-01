@@ -1,27 +1,39 @@
-//! Simple example demonstrating the krun-api Rust API.
+//! Simple example demonstrating the msb_krun Rust API.
 //!
 //! Prerequisites:
-//! - libkrunfw installed (provides the kernel)
-//! - A rootfs with /init.krun or specify your own executable
+//! - libkrunfw shared library (set KRUNFW_PATH or install system-wide)
+//! - The rootfs-alpine git submodule initialized
+//!
+//! On macOS, the binary must be codesigned with the hypervisor entitlement:
+//!   cd examples && make rust_vm
 
 use msb_krun::{Result, VmBuilder};
 
 fn main() -> Result<()> {
-    // Create a simple VM that runs /bin/sh
-    let builder = VmBuilder::new().machine(|m| m.vcpus(2).memory_mib(1024));
+    env_logger::init();
 
-    #[cfg(not(feature = "tee"))]
-    let builder = builder.fs(|fs| fs.root("/")); // Share host root as guest root
+    let krunfw_path =
+        std::env::var("KRUNFW_PATH").unwrap_or_else(|_| "libkrunfw.5.dylib".to_string());
 
-    let exit_code = builder
+    let rootfs_path = format!(
+        "{}/rootfs-alpine/{}",
+        env!("CARGO_MANIFEST_DIR"),
+        std::env::consts::ARCH,
+    );
+
+    eprintln!("Entering VM (rootfs={rootfs_path})");
+
+    VmBuilder::new()
+        .machine(|m| m.vcpus(2).memory_mib(1024))
+        .kernel(|k| k.krunfw_path(&krunfw_path))
+        .fs(|fs| fs.root(&rootfs_path))
         .exec(|e| {
             e.path("/bin/echo")
                 .args(["Hello from libkrun VM!"])
                 .env("HOME", "/root")
         })
         .build()?
-        .run()?;
+        .enter()?;
 
-    println!("VM exited with code: {}", exit_code);
-    Ok(())
+    unreachable!()
 }
