@@ -101,7 +101,7 @@ use vm_memory::{GuestAddress, GuestMemoryMmap};
 
 #[cfg(target_arch = "aarch64")]
 #[allow(dead_code)]
-static EDK2_BINARY: &[u8] = include_bytes!("../../../edk2/KRUN_EFI.silent.fd");
+static EDK2_BINARY: &[u8] = include_bytes!("../KRUN_EFI.silent.fd");
 
 /// Errors associated with starting the instance.
 #[derive(Debug)]
