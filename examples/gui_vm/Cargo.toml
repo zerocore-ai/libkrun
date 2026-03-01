@@ -2,6 +2,7 @@
 name = "gui_vm"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [dependencies]
 gtk_display = { path = "../krun_gtk_display" }

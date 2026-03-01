@@ -3,6 +3,7 @@ name = "gtk_display"
 description = "Reference implementation of a display backend for libkrun"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [dependencies]
 utils = { path = "../../src/utils", package = "msb_krun_utils" } # Our version of rust vmm-sys-util
