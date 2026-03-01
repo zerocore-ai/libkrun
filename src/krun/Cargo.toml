@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["The libkrun Authors"]
 edition = "2021"
 description = "Native Rust API for libkrun microVMs"
-repository = "https://github.com/containers/libkrun"
+repository = "https://github.com/zerocore-ai/libkrun"
 license = "Apache-2.0"
 
 [features]
