@@ -137,6 +137,7 @@ ifeq ($(BUILD_INIT),1)
 INIT_BINARY = init/init
 $(INIT_BINARY): $(INIT_SRC) $(SYSROOT_TARGET)
 	$(CC_LINUX) -O2 -static -Wall $(INIT_DEFS) -o $@ $(INIT_SRC) $(INIT_DEFS)
+	cp $@ src/devices/init
 endif
 
 AWS_NITRO_INIT_BINARY= init/aws-nitro/init
