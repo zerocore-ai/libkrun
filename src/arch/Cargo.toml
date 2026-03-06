@@ -15,7 +15,7 @@ efi = []
 
 [dependencies]
 libc = ">=0.2.39"
-vm-memory = { version = ">=0.13", features = ["backend-mmap"] }
+vm-memory = { version = "~0.16", features = ["backend-mmap"] }
 vmm-sys-util = ">= 0.14"
 
 arch_gen = { package = "msb_krun_arch_gen", version = "0.1.0", path = "../arch_gen" }

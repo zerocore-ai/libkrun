@@ -15,8 +15,8 @@ pub mod backend;
 pub mod device;
 #[cfg(target_os = "linux")]
 mod tap;
-mod unixgram;
-mod unixstream;
+pub mod unixgram;
+pub mod unixstream;
 mod worker;
 
 fn vnet_hdr_len() -> usize {

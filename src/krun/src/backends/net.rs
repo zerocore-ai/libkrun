@@ -45,3 +45,9 @@
 
 #[cfg(feature = "net")]
 pub use devices::virtio::net::backend::{ConnectError, NetBackend, ReadError, WriteError};
+
+#[cfg(feature = "net")]
+pub use devices::virtio::net::unixgram::Unixgram;
+
+#[cfg(feature = "net")]
+pub use devices::virtio::net::unixstream::Unixstream;
