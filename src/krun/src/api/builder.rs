@@ -3,7 +3,7 @@
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use std::sync::Arc;
 
-use vmm::resources::VmResources;
+use vmm::resources::{VirtioConsoleConfigMode, VmResources};
 use vmm::vmm_config::machine_config::VmConfig;
 
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
@@ -326,6 +326,12 @@ impl VmBuilder {
         {
             vmr.gpu_virgl_flags = self.console.gpu_virgl_flags;
             vmr.gpu_shm_size = self.console.gpu_shm_size;
+        }
+
+        // Apply console port configuration
+        if !self.console.ports.is_empty() {
+            vmr.virtio_consoles
+                .push(VirtioConsoleConfigMode::Explicit(self.console.ports));
         }
 
         // Format execution configuration

@@ -1,6 +1,9 @@
 //! Sub-builders for VmBuilder nested configuration.
 
+use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
+
+use vmm::resources::PortConfig;
 
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use crate::backends::fs::DynFileSystem;
@@ -166,6 +169,7 @@ pub enum NetConfig {
 #[derive(Debug, Clone, Default)]
 pub struct ConsoleBuilder {
     pub(crate) output: Option<PathBuf>,
+    pub(crate) ports: Vec<PortConfig>,
     #[cfg(feature = "snd")]
     pub(crate) sound: bool,
     #[cfg(feature = "gpu")]
@@ -469,6 +473,33 @@ impl ConsoleBuilder {
     #[cfg(feature = "gpu")]
     pub fn gpu_shm_size(mut self, size: usize) -> Self {
         self.gpu_shm_size = Some(size);
+        self
+    }
+
+    /// Add a bidirectional I/O port to the console device.
+    ///
+    /// Creates a named port accessible in the guest via `/sys/class/virtio-ports/<name>`.
+    /// The host reads from `input_fd` and writes to `output_fd`. Pass the same FD for both
+    /// when using a bidirectional socket.
+    pub fn port(mut self, name: &str, input_fd: RawFd, output_fd: RawFd) -> Self {
+        self.ports.push(PortConfig::InOut {
+            name: name.to_string(),
+            input_fd,
+            output_fd,
+        });
+        self
+    }
+
+    /// Add a TTY port to the console device.
+    ///
+    /// Creates a named port accessible in the guest via `/sys/class/virtio-ports/<name>`.
+    /// The `tty_fd` must be a valid terminal file descriptor. Terminal raw mode is configured
+    /// automatically.
+    pub fn port_tty(mut self, name: &str, tty_fd: RawFd) -> Self {
+        self.ports.push(PortConfig::Tty {
+            name: name.to_string(),
+            tty_fd,
+        });
         self
     }
 }

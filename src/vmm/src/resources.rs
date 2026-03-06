@@ -100,6 +100,7 @@ pub enum VirtioConsoleConfigMode {
     Explicit(Vec<PortConfig>),
 }
 
+#[derive(Debug, Clone)]
 pub enum PortConfig {
     Tty {
         name: String,
