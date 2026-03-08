@@ -385,6 +385,7 @@ impl VmBuilder {
             self.exec.uid,
             self.exec.gid,
             self.kernel.krunfw_path,
+            self.kernel.init_path,
         ))
     }
 }

@@ -42,6 +42,7 @@ pub struct Vm {
     uid: Option<u32>,
     gid: Option<u32>,
     krunfw_path: Option<PathBuf>,
+    init_path: Option<String>,
     /// Keeps the libkrunfw library loaded so kernel memory pointers remain valid.
     _krunfw_library: Option<libloading::Library>,
 }
@@ -63,6 +64,7 @@ impl Vm {
         uid: Option<u32>,
         gid: Option<u32>,
         krunfw_path: Option<PathBuf>,
+        init_path: Option<String>,
     ) -> Self {
         Self {
             vmr,
@@ -74,6 +76,7 @@ impl Vm {
             uid,
             gid,
             krunfw_path,
+            init_path,
             _krunfw_library: None,
         }
     }
@@ -107,9 +110,10 @@ impl Vm {
         }
 
         // Build kernel command line
+        let init = self.init_path.as_deref().unwrap_or(INIT_PATH);
         let kernel_cmdline = KernelCmdlineConfig {
             prolog: Some(format!(
-                "{} root=/dev/root init={INIT_PATH}",
+                "{} root=/dev/root init={init}",
                 vmm::vmm_config::kernel_cmdline::DEFAULT_KERNEL_CMDLINE,
             )),
             krun_env: Some(format!(
