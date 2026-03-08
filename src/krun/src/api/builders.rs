@@ -57,6 +57,7 @@ pub struct MachineBuilder {
 pub struct KernelBuilder {
     pub(crate) cmdline: Option<String>,
     pub(crate) krunfw_path: Option<PathBuf>,
+    pub(crate) init_path: Option<String>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -325,6 +326,15 @@ impl KernelBuilder {
     /// When not set, the OS dynamic linker's default search path is used.
     pub fn krunfw_path(mut self, path: impl AsRef<Path>) -> Self {
         self.krunfw_path = Some(path.as_ref().to_path_buf());
+        self
+    }
+
+    /// Set the path to the init binary inside the guest.
+    ///
+    /// This controls the kernel `init=` parameter. When not set, defaults
+    /// to `/init.krun`.
+    pub fn init_path(mut self, path: impl AsRef<Path>) -> Self {
+        self.init_path = Some(path.as_ref().to_string_lossy().to_string());
         self
     }
 }
