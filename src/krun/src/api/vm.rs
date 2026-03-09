@@ -2,6 +2,7 @@
 
 use std::convert::Infallible;
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 #[cfg(target_os = "linux")]
 use std::env;
@@ -109,6 +110,12 @@ impl Vm {
             self.load_krunfw()?;
         }
 
+        // Capture boot start timestamp (epoch nanoseconds) for guest-side timing.
+        let boot_start_ns = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+
         // Build kernel command line
         let init = self.init_path.as_deref().unwrap_or(INIT_PATH);
         let kernel_cmdline = KernelCmdlineConfig {
@@ -117,7 +124,7 @@ impl Vm {
                 vmm::vmm_config::kernel_cmdline::DEFAULT_KERNEL_CMDLINE,
             )),
             krun_env: Some(format!(
-                " {} {} {} {}",
+                " {} {} {} {} KRUN_BOOT_START_NS={boot_start_ns}",
                 self.get_exec_path(),
                 self.get_workdir(),
                 self.get_rlimits(),
