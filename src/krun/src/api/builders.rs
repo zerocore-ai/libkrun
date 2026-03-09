@@ -171,6 +171,7 @@ pub enum NetConfig {
 pub struct ConsoleBuilder {
     pub(crate) output: Option<PathBuf>,
     pub(crate) ports: Vec<PortConfig>,
+    pub(crate) disable_implicit: bool,
     #[cfg(feature = "snd")]
     pub(crate) sound: bool,
     #[cfg(feature = "gpu")]
@@ -510,6 +511,15 @@ impl ConsoleBuilder {
             name: name.to_string(),
             tty_fd,
         });
+        self
+    }
+
+    /// Disable the implicit console device.
+    ///
+    /// By default libkrun creates an implicit console that reads from `STDIN_FILENO`.
+    /// Call this to suppress that console when using only explicit ports.
+    pub fn disable_implicit(mut self) -> Self {
+        self.disable_implicit = true;
         self
     }
 }

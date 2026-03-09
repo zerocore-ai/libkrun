@@ -334,6 +334,10 @@ impl VmBuilder {
                 .push(VirtioConsoleConfigMode::Explicit(self.console.ports));
         }
 
+        if self.console.disable_implicit {
+            vmr.disable_implicit_console = true;
+        }
+
         // Format execution configuration
         let exec_path = self.exec.path;
 

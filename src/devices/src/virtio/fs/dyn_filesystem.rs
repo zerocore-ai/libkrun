@@ -153,7 +153,13 @@ pub trait DynFileSystem: Send + Sync {
     }
 
     /// Open a file.
-    fn open(&self, ctx: Context, inode: u64, flags: u32) -> io::Result<(Option<u64>, OpenOptions)> {
+    fn open(
+        &self,
+        ctx: Context,
+        inode: u64,
+        kill_priv: bool,
+        flags: u32,
+    ) -> io::Result<(Option<u64>, OpenOptions)> {
         Ok((None, OpenOptions::empty()))
     }
 
@@ -165,6 +171,7 @@ pub trait DynFileSystem: Send + Sync {
         parent: u64,
         name: &CStr,
         mode: u32,
+        kill_priv: bool,
         flags: u32,
         umask: u32,
         extensions: Extensions,
@@ -580,10 +587,10 @@ impl FileSystem for DynFileSystemAdapter {
         &self,
         ctx: Context,
         inode: u64,
-        _kill_priv: bool,
+        kill_priv: bool,
         flags: u32,
     ) -> io::Result<(Option<u64>, OpenOptions)> {
-        self.0.open(ctx, inode, flags)
+        self.0.open(ctx, inode, kill_priv, flags)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -593,13 +600,13 @@ impl FileSystem for DynFileSystemAdapter {
         parent: u64,
         name: &CStr,
         mode: u32,
-        _kill_priv: bool,
+        kill_priv: bool,
         flags: u32,
         umask: u32,
         extensions: Extensions,
     ) -> io::Result<(Entry, Option<u64>, OpenOptions)> {
         self.0
-            .create(ctx, parent, name, mode, flags, umask, extensions)
+            .create(ctx, parent, name, mode, kill_priv, flags, umask, extensions)
     }
 
     #[allow(clippy::too_many_arguments)]
