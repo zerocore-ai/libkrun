@@ -13,7 +13,7 @@ use crate::virtio::{
 };
 use crate::Error as DeviceError;
 
-use super::backend::{ReadError, WriteError};
+use super::backend::{NetBackend, ReadError, WriteError};
 use super::worker::NetWorker;
 
 use std::cmp;
@@ -59,7 +59,6 @@ struct VirtioNetConfig {
 // Safe because it only has data and has no implicit padding.
 unsafe impl ByteValued for VirtioNetConfig {}
 
-#[derive(Clone)]
 pub enum VirtioNetBackend {
     UnixstreamFd(RawFd),
     UnixstreamPath(PathBuf),
@@ -67,11 +66,12 @@ pub enum VirtioNetBackend {
     UnixgramPath(PathBuf, bool),
     #[cfg(target_os = "linux")]
     Tap(String),
+    Custom(Box<dyn NetBackend + Send>),
 }
 
 pub struct Net {
     id: String,
-    pub cfg_backend: VirtioNetBackend,
+    pub cfg_backend: Option<VirtioNetBackend>,
 
     avail_features: u64,
     acked_features: u64,
@@ -102,7 +102,7 @@ impl Net {
 
         Ok(Net {
             id,
-            cfg_backend,
+            cfg_backend: Some(cfg_backend),
 
             avail_features,
             acked_features: 0u64,
@@ -115,11 +115,6 @@ impl Net {
     /// Provides the ID of this net device.
     pub fn id(&self) -> &str {
         &self.id
-    }
-
-    /// Provides the virtio-net backend of this net device.
-    pub fn backend(&self) -> &VirtioNetBackend {
-        &self.cfg_backend
     }
 }
 
@@ -181,13 +176,18 @@ impl VirtioDevice for Net {
             ActivateError::BadActivate
         })?;
 
+        let cfg_backend = self.cfg_backend.take().ok_or_else(|| {
+            error!("Cannot activate net device: backend already taken");
+            ActivateError::BadActivate
+        })?;
+
         match NetWorker::new(
             rx_q,
             tx_q,
             interrupt.clone(),
             mem.clone(),
             self.acked_features,
-            self.cfg_backend.clone(),
+            cfg_backend,
         ) {
             Ok(worker) => {
                 worker.run();

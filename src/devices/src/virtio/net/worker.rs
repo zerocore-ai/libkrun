@@ -65,6 +65,7 @@ impl NetWorker {
             VirtioNetBackend::Tap(tap_name) => {
                 Box::new(Tap::new(tap_name, _vnet_features)?) as Box<dyn NetBackend + Send>
             }
+            VirtioNetBackend::Custom(backend) => backend,
         };
 
         Ok(Self {

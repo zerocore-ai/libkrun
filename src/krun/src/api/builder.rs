@@ -15,12 +15,19 @@ use vmm::vmm_config::fs::FsDeviceConfig;
 use super::builders::DiskBuilder;
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use super::builders::FsConfig;
-#[cfg(feature = "net")]
-use super::builders::NetBuilder;
 use super::builders::{ConsoleBuilder, ExecBuilder, FsBuilder, KernelBuilder, MachineBuilder};
+#[cfg(feature = "net")]
+use super::builders::{NetBuilder, NetConfig};
 
 use super::error::{ConfigError, Error, Result};
 use super::vm::Vm;
+
+#[cfg(feature = "net")]
+use devices::virtio::net::device::VirtioNetBackend;
+#[cfg(feature = "net")]
+use std::os::fd::IntoRawFd;
+#[cfg(feature = "net")]
+use vmm::vmm_config::net::NetworkInterfaceConfig;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -158,11 +165,27 @@ impl VmBuilder {
     ///
     /// Can be called multiple times to add multiple devices.
     ///
-    /// # Example
+    /// # Examples
+    ///
+    /// Unixgram from a pre-opened fd:
     ///
     /// ```rust,ignore
     /// VmBuilder::new()
-    ///     .net(|n| n.mac([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]).custom(my_backend));
+    ///     .net(|n| n.mac([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]).unixgram(fd));
+    /// ```
+    ///
+    /// Unixgram connecting to a socket path:
+    ///
+    /// ```rust,ignore
+    /// VmBuilder::new()
+    ///     .net(|n| n.unixgram_path("/tmp/net.sock", true));
+    /// ```
+    ///
+    /// Custom backend:
+    ///
+    /// ```rust,ignore
+    /// VmBuilder::new()
+    ///     .net(|n| n.custom(Box::new(my_backend)));
     /// ```
     #[cfg(feature = "net")]
     pub fn net(mut self, f: impl FnOnce(NetBuilder) -> NetBuilder) -> Self {
@@ -338,6 +361,44 @@ impl VmBuilder {
             vmr.disable_implicit_console = true;
         }
 
+        // Apply network configuration
+        #[cfg(feature = "net")]
+        for (i, config) in self.net.configs.into_iter().enumerate() {
+            let (mac, backend) = match config {
+                NetConfig::UnixgramFd { mac, fd } => {
+                    (mac, VirtioNetBackend::UnixgramFd(fd.into_raw_fd()))
+                }
+                NetConfig::UnixgramPath {
+                    mac,
+                    path,
+                    send_vfkit_magic,
+                } => (mac, VirtioNetBackend::UnixgramPath(path, send_vfkit_magic)),
+                NetConfig::UnixstreamFd { mac, fd } => {
+                    (mac, VirtioNetBackend::UnixstreamFd(fd.into_raw_fd()))
+                }
+                NetConfig::UnixstreamPath { mac, path } => {
+                    (mac, VirtioNetBackend::UnixstreamPath(path))
+                }
+                #[cfg(target_os = "linux")]
+                NetConfig::Tap { mac, name } => (mac, VirtioNetBackend::Tap(name)),
+                NetConfig::Custom { mac, backend } => (mac, VirtioNetBackend::Custom(backend)),
+            };
+
+            let mac = mac.unwrap_or_else(|| generate_mac(i));
+            let iface_id = format!("eth{i}");
+
+            let net_config = NetworkInterfaceConfig {
+                iface_id,
+                backend,
+                mac,
+                features: 0,
+            };
+
+            vmr.net
+                .insert(net_config)
+                .map_err(|e| Error::Config(ConfigError::Network(e.to_string())))?;
+        }
+
         // Format execution configuration
         let exec_path = self.exec.path;
 
@@ -402,4 +463,21 @@ impl Default for VmBuilder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Generate a locally-administered MAC address from an interface index.
+#[cfg(feature = "net")]
+fn generate_mac(index: usize) -> [u8; 6] {
+    [
+        0x52,
+        0x54,
+        0x00,
+        0x12,
+        0x34,
+        0x56u8.wrapping_add(index as u8),
+    ]
 }

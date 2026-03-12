@@ -381,8 +381,8 @@ impl TryFrom<ContextConfig> for NitroEnclave {
                     let device = list.pop_front().unwrap();
                     let device = device.lock().unwrap();
 
-                    let fd = match device.cfg_backend {
-                        VirtioNetBackend::UnixstreamFd(fd) => RawFd::from(fd),
+                    let fd = match device.cfg_backend.as_ref() {
+                        Some(VirtioNetBackend::UnixstreamFd(fd)) => RawFd::from(*fd),
                         _ => return Err(libc::EINVAL),
                     };
 

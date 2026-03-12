@@ -9,6 +9,9 @@ use vmm::resources::PortConfig;
 use crate::backends::fs::DynFileSystem;
 
 #[cfg(feature = "net")]
+use std::os::fd::OwnedFd;
+
+#[cfg(feature = "net")]
 use crate::backends::net::NetBackend;
 
 //--------------------------------------------------------------------------------------------------
@@ -135,6 +138,21 @@ pub struct NetBuilder {
 /// Configuration for a single network device.
 #[cfg(feature = "net")]
 pub enum NetConfig {
+    /// Unixgram backend from a pre-opened fd.
+    UnixgramFd { mac: Option<[u8; 6]>, fd: OwnedFd },
+    /// Unixgram backend connecting to a socket path.
+    UnixgramPath {
+        mac: Option<[u8; 6]>,
+        path: PathBuf,
+        send_vfkit_magic: bool,
+    },
+    /// Unixstream backend from a pre-opened fd.
+    UnixstreamFd { mac: Option<[u8; 6]>, fd: OwnedFd },
+    /// Unixstream backend connecting to a socket path.
+    UnixstreamPath { mac: Option<[u8; 6]>, path: PathBuf },
+    /// TAP backend (Linux only).
+    #[cfg(target_os = "linux")]
+    Tap { mac: Option<[u8; 6]>, name: String },
     /// Custom network backend.
     Custom {
         mac: Option<[u8; 6]>,
@@ -432,6 +450,52 @@ impl NetBuilder {
     /// Set the MAC address for the next network device.
     pub fn mac(mut self, mac: [u8; 6]) -> Self {
         self.current_mac = Some(mac);
+        self
+    }
+
+    /// Attach a unixgram network backend from a pre-opened fd.
+    pub fn unixgram(mut self, fd: OwnedFd) -> Self {
+        let mac = self.current_mac.take();
+        self.configs.push(NetConfig::UnixgramFd { mac, fd });
+        self
+    }
+
+    /// Attach a unixgram network backend connecting to a socket path.
+    pub fn unixgram_path(mut self, path: impl AsRef<Path>, send_vfkit_magic: bool) -> Self {
+        let mac = self.current_mac.take();
+        self.configs.push(NetConfig::UnixgramPath {
+            mac,
+            path: path.as_ref().to_path_buf(),
+            send_vfkit_magic,
+        });
+        self
+    }
+
+    /// Attach a unixstream network backend from a pre-opened fd.
+    pub fn unixstream(mut self, fd: OwnedFd) -> Self {
+        let mac = self.current_mac.take();
+        self.configs.push(NetConfig::UnixstreamFd { mac, fd });
+        self
+    }
+
+    /// Attach a unixstream network backend connecting to a socket path.
+    pub fn unixstream_path(mut self, path: impl AsRef<Path>) -> Self {
+        let mac = self.current_mac.take();
+        self.configs.push(NetConfig::UnixstreamPath {
+            mac,
+            path: path.as_ref().to_path_buf(),
+        });
+        self
+    }
+
+    /// Attach a TAP network backend.
+    #[cfg(target_os = "linux")]
+    pub fn tap(mut self, name: impl Into<String>) -> Self {
+        let mac = self.current_mac.take();
+        self.configs.push(NetConfig::Tap {
+            mac,
+            name: name.into(),
+        });
         self
     }
 
