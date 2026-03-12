@@ -15,9 +15,9 @@ use vmm::vmm_config::fs::FsDeviceConfig;
 use super::builders::DiskBuilder;
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use super::builders::FsConfig;
+use super::builders::{ConsoleBuilder, ExecBuilder, FsBuilder, KernelBuilder, MachineBuilder};
 #[cfg(feature = "net")]
 use super::builders::{NetBuilder, NetConfig};
-use super::builders::{ConsoleBuilder, ExecBuilder, FsBuilder, KernelBuilder, MachineBuilder};
 
 use super::error::{ConfigError, Error, Result};
 use super::vm::Vm;
@@ -381,9 +381,7 @@ impl VmBuilder {
                 }
                 #[cfg(target_os = "linux")]
                 NetConfig::Tap { mac, name } => (mac, VirtioNetBackend::Tap(name)),
-                NetConfig::Custom { mac, backend } => {
-                    (mac, VirtioNetBackend::Custom(backend))
-                }
+                NetConfig::Custom { mac, backend } => (mac, VirtioNetBackend::Custom(backend)),
             };
 
             let mac = mac.unwrap_or_else(|| generate_mac(i));
@@ -474,5 +472,12 @@ impl Default for VmBuilder {
 /// Generate a locally-administered MAC address from an interface index.
 #[cfg(feature = "net")]
 fn generate_mac(index: usize) -> [u8; 6] {
-    [0x52, 0x54, 0x00, 0x12, 0x34, 0x56u8.wrapping_add(index as u8)]
+    [
+        0x52,
+        0x54,
+        0x00,
+        0x12,
+        0x34,
+        0x56u8.wrapping_add(index as u8),
+    ]
 }

@@ -139,10 +139,7 @@ pub struct NetBuilder {
 #[cfg(feature = "net")]
 pub enum NetConfig {
     /// Unixgram backend from a pre-opened fd.
-    UnixgramFd {
-        mac: Option<[u8; 6]>,
-        fd: OwnedFd,
-    },
+    UnixgramFd { mac: Option<[u8; 6]>, fd: OwnedFd },
     /// Unixgram backend connecting to a socket path.
     UnixgramPath {
         mac: Option<[u8; 6]>,
@@ -150,21 +147,12 @@ pub enum NetConfig {
         send_vfkit_magic: bool,
     },
     /// Unixstream backend from a pre-opened fd.
-    UnixstreamFd {
-        mac: Option<[u8; 6]>,
-        fd: OwnedFd,
-    },
+    UnixstreamFd { mac: Option<[u8; 6]>, fd: OwnedFd },
     /// Unixstream backend connecting to a socket path.
-    UnixstreamPath {
-        mac: Option<[u8; 6]>,
-        path: PathBuf,
-    },
+    UnixstreamPath { mac: Option<[u8; 6]>, path: PathBuf },
     /// TAP backend (Linux only).
     #[cfg(target_os = "linux")]
-    Tap {
-        mac: Option<[u8; 6]>,
-        name: String,
-    },
+    Tap { mac: Option<[u8; 6]>, name: String },
     /// Custom network backend.
     Custom {
         mac: Option<[u8; 6]>,

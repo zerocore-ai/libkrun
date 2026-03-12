@@ -116,7 +116,6 @@ impl Net {
     pub fn id(&self) -> &str {
         &self.id
     }
-
 }
 
 impl VirtioDevice for Net {
