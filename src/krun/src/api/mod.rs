@@ -39,6 +39,8 @@ pub mod vm;
 pub use builder::VmBuilder;
 #[cfg(feature = "blk")]
 pub use builders::DiskBuilder;
+#[cfg(feature = "blk")]
+pub use builders::DiskImageFormat;
 #[cfg(feature = "net")]
 pub use builders::NetBuilder;
 pub use builders::{ConsoleBuilder, ExecBuilder, FsBuilder, KernelBuilder, MachineBuilder};

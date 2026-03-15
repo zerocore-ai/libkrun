@@ -10,7 +10,7 @@ license = "Apache-2.0"
 [features]
 default = []
 net = ["devices/net", "vmm/net"]
-blk = []
+blk = ["devices/blk", "vmm/blk"]
 gpu = ["krun_display"]
 snd = []
 tee = []
