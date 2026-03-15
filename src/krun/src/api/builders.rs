@@ -248,6 +248,15 @@ pub struct ExecBuilder {
 // Types: Disk Builder
 //--------------------------------------------------------------------------------------------------
 
+/// Supported disk image formats.
+#[cfg(feature = "blk")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskImageFormat {
+    Raw,
+    Qcow2,
+    Vmdk,
+}
+
 /// Builder for block device configuration.
 ///
 /// # Example
@@ -258,11 +267,12 @@ pub struct ExecBuilder {
 ///     .disk(|d| d.path("/path/to/disk.img").read_only(true));
 /// ```
 #[cfg(feature = "blk")]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct DiskBuilder {
     pub(crate) configs: Vec<DiskConfig>,
     current_path: Option<PathBuf>,
     current_read_only: bool,
+    current_format: DiskImageFormat,
 }
 
 /// Configuration for a single block device.
@@ -271,6 +281,7 @@ pub struct DiskBuilder {
 pub struct DiskConfig {
     pub path: PathBuf,
     pub read_only: bool,
+    pub format: DiskImageFormat,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -667,7 +678,18 @@ impl ExecBuilder {
 impl DiskBuilder {
     /// Create a new disk builder.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            configs: Vec::new(),
+            current_path: None,
+            current_read_only: false,
+            current_format: DiskImageFormat::Raw,
+        }
+    }
+
+    /// Set the disk image format for the current disk.
+    pub fn format(mut self, format: DiskImageFormat) -> Self {
+        self.current_format = format;
+        self
     }
 
     /// Set the path for a block device.
@@ -677,8 +699,10 @@ impl DiskBuilder {
             self.configs.push(DiskConfig {
                 path: pending_path,
                 read_only: self.current_read_only,
+                format: self.current_format,
             });
             self.current_read_only = false;
+            self.current_format = DiskImageFormat::Raw;
         }
 
         self.current_path = Some(path.as_ref().to_path_buf());
@@ -697,8 +721,31 @@ impl DiskBuilder {
             self.configs.push(DiskConfig {
                 path,
                 read_only: self.current_read_only,
+                format: self.current_format,
             });
         }
         self
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations: Disk Builder
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(feature = "blk")]
+impl Default for DiskBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "blk")]
+impl From<DiskImageFormat> for devices::virtio::block::ImageType {
+    fn from(format: DiskImageFormat) -> Self {
+        match format {
+            DiskImageFormat::Raw => devices::virtio::block::ImageType::Raw,
+            DiskImageFormat::Qcow2 => devices::virtio::block::ImageType::Qcow2,
+            DiskImageFormat::Vmdk => devices::virtio::block::ImageType::Vmdk,
+        }
     }
 }

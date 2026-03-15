@@ -22,6 +22,13 @@ use super::builders::{NetBuilder, NetConfig};
 use super::error::{ConfigError, Error, Result};
 use super::vm::Vm;
 
+#[cfg(feature = "blk")]
+use devices::virtio::block::ImageType;
+#[cfg(feature = "blk")]
+use devices::virtio::CacheType;
+#[cfg(feature = "blk")]
+use vmm::vmm_config::block::BlockDeviceConfig;
+
 #[cfg(feature = "net")]
 use devices::virtio::net::device::VirtioNetBackend;
 #[cfg(feature = "net")]
@@ -397,6 +404,26 @@ impl VmBuilder {
             vmr.net
                 .insert(net_config)
                 .map_err(|e| Error::Config(ConfigError::Network(e.to_string())))?;
+        }
+
+        // Apply block device configuration
+        #[cfg(feature = "blk")]
+        for (i, config) in self.disk.configs.into_iter().enumerate() {
+            let block_id = format!("vd{}", (b'a' + i as u8) as char);
+            let image_type: ImageType = config.format.into();
+
+            let blk_config = BlockDeviceConfig {
+                block_id,
+                cache_type: CacheType::Writeback,
+                disk_image_path: config.path.to_string_lossy().to_string(),
+                disk_image_format: image_type,
+                is_disk_read_only: config.read_only,
+                direct_io: false,
+                sync_mode: devices::virtio::block::SyncMode::default(),
+            };
+
+            vmr.add_block_device(blk_config)
+                .map_err(|e| Error::Config(ConfigError::Block(e.to_string())))?;
         }
 
         // Format execution configuration
