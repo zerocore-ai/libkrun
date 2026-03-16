@@ -217,8 +217,6 @@ pub struct ConsoleBuilder {
 ///             .env("HOME", "/root")
 ///             .env("LANG", "en_US.UTF-8")
 ///             .workdir("/app")
-///             .uid(1000)
-///             .gid(1000)
 ///             .rlimit("NOFILE", 1024, 4096)
 ///     });
 /// ```
@@ -239,8 +237,6 @@ pub struct ExecBuilder {
     pub(crate) args: Vec<String>,
     pub(crate) env: Vec<(String, String)>,
     pub(crate) workdir: Option<String>,
-    pub(crate) uid: Option<u32>,
-    pub(crate) gid: Option<u32>,
     pub(crate) rlimits: Vec<(String, u64, u64)>,
 }
 
@@ -648,18 +644,6 @@ impl ExecBuilder {
     /// Set the working directory.
     pub fn workdir(mut self, path: impl AsRef<Path>) -> Self {
         self.workdir = Some(path.as_ref().to_string_lossy().to_string());
-        self
-    }
-
-    /// Set the user ID.
-    pub fn uid(mut self, uid: u32) -> Self {
-        self.uid = Some(uid);
-        self
-    }
-
-    /// Set the group ID.
-    pub fn gid(mut self, gid: u32) -> Self {
-        self.gid = Some(gid);
         self
     }
 

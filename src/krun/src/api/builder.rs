@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use vmm::resources::{VirtioConsoleConfigMode, VmResources};
 use vmm::vmm_config::machine_config::VmConfig;
+use vmm::vmm_config::machine_config::VmConfigError;
 
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use vmm::vmm_config::fs::CustomFsDeviceConfig;
@@ -260,8 +261,6 @@ impl VmBuilder {
     ///             .env("HOME", "/root")
     ///             .env("LANG", "en_US.UTF-8")
     ///             .workdir("/app")
-    ///             .uid(1000)
-    ///             .gid(1000)
     ///             .rlimit("NOFILE", 1024, 4096)
     ///     });
     /// ```
@@ -304,13 +303,9 @@ impl VmBuilder {
             ht_enabled: Some(self.machine.hyperthreading),
             ..Default::default()
         };
-        let _ = vmr.set_vm_config(&vm_config);
+        vmr.set_vm_config(&vm_config)
+            .map_err(|err| map_vm_config_error(&self.machine, err))?;
         vmr.nested_enabled = self.machine.nested_virt;
-
-        // Apply kernel configuration
-        if let Some(cmdline) = self.kernel.cmdline {
-            vmr.kernel_cmdline.epilog = Some(cmdline);
-        }
 
         // Apply filesystem configuration
         #[cfg(not(feature = "tee"))]
@@ -349,13 +344,18 @@ impl VmBuilder {
 
         #[cfg(feature = "snd")]
         {
-            vmr.snd_device = self.console.sound;
+            vmr.set_snd_device(self.console.sound);
         }
 
         #[cfg(feature = "gpu")]
         {
-            vmr.gpu_virgl_flags = self.console.gpu_virgl_flags;
-            vmr.gpu_shm_size = self.console.gpu_shm_size;
+            if let Some(virgl_flags) = self.console.gpu_virgl_flags {
+                vmr.set_gpu_virgl_flags(virgl_flags);
+            }
+
+            if let Some(shm_size) = self.console.gpu_shm_size {
+                vmr.set_gpu_shm_size(shm_size);
+            }
         }
 
         // Apply console port configuration
@@ -469,13 +469,12 @@ impl VmBuilder {
 
         Ok(Vm::new(
             vmr,
+            self.kernel.cmdline,
             exec_path,
             args,
             env,
             self.exec.workdir,
             rlimits,
-            self.exec.uid,
-            self.exec.gid,
             self.kernel.krunfw_path,
             self.kernel.init_path,
         ))
@@ -507,4 +506,40 @@ fn generate_mac(index: usize) -> [u8; 6] {
         0x34,
         0x56u8.wrapping_add(index as u8),
     ]
+}
+
+fn map_vm_config_error(machine: &MachineBuilder, err: VmConfigError) -> Error {
+    match err {
+        VmConfigError::InvalidVcpuCount => {
+            Error::Config(ConfigError::InvalidVcpuCount(machine.vcpus))
+        }
+        VmConfigError::InvalidMemorySize => {
+            Error::Config(ConfigError::InvalidMemorySize(machine.memory_mib))
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_rejects_invalid_machine_config() {
+        let err = match VmBuilder::new()
+            .machine(|machine| machine.vcpus(3).hyperthreading(true))
+            .build()
+        {
+            Ok(_) => panic!("odd vCPU count with hyperthreading should fail"),
+            Err(err) => err,
+        };
+
+        match err {
+            Error::Config(ConfigError::InvalidVcpuCount(3)) => {}
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
 }

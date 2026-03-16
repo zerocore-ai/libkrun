@@ -35,13 +35,12 @@ const INIT_PATH: &str = "/init.krun";
 /// Created via [`VmBuilder::build()`](super::builder::VmBuilder::build).
 pub struct Vm {
     vmr: VmResources,
+    kernel_cmdline: Option<String>,
     exec_path: Option<String>,
     args: Option<String>,
     env: Option<String>,
     workdir: Option<String>,
     rlimits: Option<String>,
-    uid: Option<u32>,
-    gid: Option<u32>,
     krunfw_path: Option<PathBuf>,
     init_path: Option<String>,
     /// Keeps the libkrunfw library loaded so kernel memory pointers remain valid.
@@ -57,25 +56,23 @@ impl Vm {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         vmr: VmResources,
+        kernel_cmdline: Option<String>,
         exec_path: Option<String>,
         args: Option<String>,
         env: Option<String>,
         workdir: Option<String>,
         rlimits: Option<String>,
-        uid: Option<u32>,
-        gid: Option<u32>,
         krunfw_path: Option<PathBuf>,
         init_path: Option<String>,
     ) -> Self {
         Self {
             vmr,
+            kernel_cmdline,
             exec_path,
             args,
             env,
             workdir,
             rlimits,
-            uid,
-            gid,
             krunfw_path,
             init_path,
             _krunfw_library: None,
@@ -117,21 +114,7 @@ impl Vm {
             .as_nanos() as u64;
 
         // Build kernel command line
-        let init = self.init_path.as_deref().unwrap_or(INIT_PATH);
-        let kernel_cmdline = KernelCmdlineConfig {
-            prolog: Some(format!(
-                "{} root=/dev/root init={init}",
-                vmm::vmm_config::kernel_cmdline::DEFAULT_KERNEL_CMDLINE,
-            )),
-            krun_env: Some(format!(
-                " {} {} {} {} KRUN_BOOT_START_NS={boot_start_ns}",
-                self.get_exec_path(),
-                self.get_workdir(),
-                self.get_rlimits(),
-                self.get_env(),
-            )),
-            epilog: Some(format!(" -- {}", self.get_args())),
-        };
+        let kernel_cmdline = self.build_kernel_cmdline(boot_start_ns);
 
         self.vmr
             .set_kernel_cmdline(kernel_cmdline)
@@ -139,9 +122,6 @@ impl Vm {
 
         // Configure vsock
         self.configure_vsock()?;
-
-        // Set UID/GID if specified
-        self.set_credentials()?;
 
         // Create shutdown EventFd on macOS aarch64 (needed for GPIO shutdown device)
         let shutdown_efd = if cfg!(target_arch = "aarch64") && cfg!(target_os = "macos") {
@@ -241,11 +221,8 @@ impl Vm {
 
         // Enable TSI for AF_UNIX if single root virtio-fs
         #[cfg(not(feature = "tee"))]
-        if tsi_flags.contains(TsiFlags::HIJACK_INET)
-            && self.vmr.fs.len() == 1
-            && self.vmr.fs[0].shared_dir == "/"
         {
-            tsi_flags |= TsiFlags::HIJACK_UNIX;
+            tsi_flags = self.maybe_enable_hijack_unix(tsi_flags);
         }
 
         let vsock_config = VsockDeviceConfig {
@@ -259,29 +236,6 @@ impl Vm {
         self.vmr
             .set_vsock_device(vsock_config)
             .map_err(|e| Error::Build(BuildError::DeviceRegistration(format!("vsock: {e:?}"))))?;
-
-        Ok(())
-    }
-
-    /// Set UID/GID credentials.
-    fn set_credentials(&self) -> Result<()> {
-        if let Some(gid) = self.gid {
-            if unsafe { libc::setgid(gid) } != 0 {
-                error!("Failed to set gid {gid}");
-                return Err(Error::Runtime(RuntimeError::Shutdown(format!(
-                    "setgid({gid}) failed"
-                ))));
-            }
-        }
-
-        if let Some(uid) = self.uid {
-            if unsafe { libc::setuid(uid) } != 0 {
-                error!("Failed to set uid {uid}");
-                return Err(Error::Runtime(RuntimeError::Shutdown(format!(
-                    "setuid({uid}) failed"
-                ))));
-            }
-        }
 
         Ok(())
     }
@@ -316,6 +270,50 @@ impl Vm {
 
     fn get_args(&self) -> String {
         self.args.clone().unwrap_or_default()
+    }
+
+    fn build_kernel_cmdline(&self, boot_start_ns: u64) -> KernelCmdlineConfig {
+        let init = self.init_path.as_deref().unwrap_or(INIT_PATH);
+        let user_cmdline = self
+            .kernel_cmdline
+            .as_deref()
+            .map(|cmdline| format!(" {cmdline}"))
+            .unwrap_or_default();
+
+        KernelCmdlineConfig {
+            prolog: Some(format!(
+                "{}{} root=/dev/root init={init}",
+                vmm::vmm_config::kernel_cmdline::DEFAULT_KERNEL_CMDLINE,
+                user_cmdline,
+            )),
+            krun_env: Some(format!(
+                " {} {} {} {} KRUN_BOOT_START_NS={boot_start_ns}",
+                self.get_exec_path(),
+                self.get_workdir(),
+                self.get_rlimits(),
+                self.get_env(),
+            )),
+            epilog: Some(format!(" -- {}", self.get_args())),
+        }
+    }
+
+    #[cfg(not(feature = "tee"))]
+    fn maybe_enable_hijack_unix(
+        &self,
+        mut tsi_flags: devices::virtio::TsiFlags,
+    ) -> devices::virtio::TsiFlags {
+        if cfg!(target_os = "macos") {
+            return tsi_flags;
+        }
+
+        if tsi_flags.contains(devices::virtio::TsiFlags::HIJACK_INET)
+            && self.vmr.fs.len() == 1
+            && self.vmr.fs[0].fs_id == "/dev/root"
+        {
+            tsi_flags |= devices::virtio::TsiFlags::HIJACK_UNIX;
+        }
+
+        tsi_flags
     }
 }
 
@@ -362,4 +360,76 @@ fn load_krunfw_library(path: Option<&std::path::Path>) -> Result<KrunfwBindings>
         get_kernel,
         library,
     })
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use devices::virtio::TsiFlags;
+    #[cfg(not(feature = "tee"))]
+    use vmm::vmm_config::fs::FsDeviceConfig;
+
+    fn make_vm() -> Vm {
+        Vm::new(
+            VmResources::default(),
+            Some("debug loglevel=7".to_string()),
+            None,
+            Some("\"--flag\"".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn build_kernel_cmdline_keeps_user_cmdline() {
+        let vm = make_vm();
+        let cmdline = vm.build_kernel_cmdline(42);
+
+        let prolog = cmdline.prolog.expect("missing prolog");
+        assert!(prolog.contains("debug loglevel=7"));
+        assert!(prolog.contains("init=/init.krun"));
+    }
+
+    #[cfg(not(feature = "tee"))]
+    #[test]
+    fn maybe_enable_hijack_unix_respects_platform_support() {
+        let mut vm = make_vm();
+        vm.vmr.fs.push(FsDeviceConfig {
+            fs_id: "/dev/root".to_string(),
+            shared_dir: "/tmp/rootfs".to_string(),
+            shm_size: None,
+            allow_root_dir_delete: false,
+        });
+
+        let flags = vm.maybe_enable_hijack_unix(TsiFlags::HIJACK_INET);
+
+        #[cfg(target_os = "macos")]
+        assert!(!flags.contains(TsiFlags::HIJACK_UNIX));
+
+        #[cfg(not(target_os = "macos"))]
+        assert!(flags.contains(TsiFlags::HIJACK_UNIX));
+    }
+
+    #[cfg(all(not(feature = "tee"), not(target_os = "macos")))]
+    #[test]
+    fn maybe_enable_hijack_unix_requires_root_fs_id() {
+        let mut vm = make_vm();
+        vm.vmr.fs.push(FsDeviceConfig {
+            fs_id: "data".to_string(),
+            shared_dir: "/".to_string(),
+            shm_size: None,
+            allow_root_dir_delete: false,
+        });
+
+        let flags = vm.maybe_enable_hijack_unix(TsiFlags::HIJACK_INET);
+
+        assert!(!flags.contains(TsiFlags::HIJACK_UNIX));
+    }
 }
