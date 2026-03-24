@@ -68,6 +68,7 @@ pub struct VmBuilder {
     net: NetBuilder,
     #[cfg(feature = "blk")]
     disk: DiskBuilder,
+    exit_observers: Vec<Box<dyn Fn() + Send + 'static>>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -93,6 +94,7 @@ impl VmBuilder {
             net: NetBuilder::new(),
             #[cfg(feature = "blk")]
             disk: DiskBuilder::new(),
+            exit_observers: Vec::new(),
         }
     }
 
@@ -243,6 +245,25 @@ impl VmBuilder {
     /// ```
     pub fn console(mut self, f: impl FnOnce(ConsoleBuilder) -> ConsoleBuilder) -> Self {
         self.console = f(self.console);
+        self
+    }
+
+    /// Register a callback that runs synchronously on graceful guest-initiated shutdown.
+    ///
+    /// Multiple observers are supported and are called in registration order.
+    /// User callbacks execute after internal device cleanup (console reset, terminal restore).
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use msb_krun::VmBuilder;
+    /// VmBuilder::new()
+    ///     .on_exit(|| {
+    ///         // flush logs, write final status, etc.
+    ///     });
+    /// ```
+    pub fn on_exit(mut self, f: impl Fn() + Send + 'static) -> Self {
+        self.exit_observers.push(Box::new(f));
         self
     }
 
@@ -477,6 +498,7 @@ impl VmBuilder {
             rlimits,
             self.kernel.krunfw_path,
             self.kernel.init_path,
+            self.exit_observers,
         ))
     }
 }
