@@ -342,6 +342,11 @@ impl Vmm {
         &self.guest_memory
     }
 
+    /// Adds an exit observer that will be called on graceful guest-initiated shutdown.
+    pub fn add_exit_observer(&mut self, observer: impl VmmExitObserver + 'static) {
+        self.exit_observers.push(Arc::new(Mutex::new(observer)));
+    }
+
     /// Injects CTRL+ALT+DEL keystroke combo in the i8042 device.
     #[cfg(target_arch = "x86_64")]
     pub fn send_ctrl_alt_del(&mut self) -> Result<()> {
@@ -353,16 +358,28 @@ impl Vmm {
             .map_err(Error::I8042Error)
     }
 
-    /// Waits for all vCPUs to exit and terminates the Firecracker process.
+    /// Invokes all registered exit observers.
+    ///
+    /// Each observer is wrapped in `catch_unwind` so that a panic in one
+    /// observer does not prevent subsequent observers from running.
+    pub fn notify_exit_observers(&mut self) {
+        for observer in &self.exit_observers {
+            let obs = Arc::clone(observer);
+            if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                obs.lock()
+                    .expect("Poisoned mutex for exit observer")
+                    .on_vmm_exit();
+            })) {
+                error!("Exit observer panicked: {e:?}");
+            }
+        }
+    }
+
+    /// Invokes exit observers and terminates the process.
     pub fn stop(&mut self, exit_code: i32) {
         info!("Vmm is stopping.");
 
-        for observer in &self.exit_observers {
-            observer
-                .lock()
-                .expect("Poisoned mutex for exit observer")
-                .on_vmm_exit();
-        }
+        self.notify_exit_observers();
 
         // Exit from Firecracker using the provided exit code. Safe because we're terminating
         // the process anyway.

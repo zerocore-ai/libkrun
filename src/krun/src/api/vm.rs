@@ -43,6 +43,7 @@ pub struct Vm {
     rlimits: Option<String>,
     krunfw_path: Option<PathBuf>,
     init_path: Option<String>,
+    exit_observers: Vec<Box<dyn Fn() + Send + 'static>>,
     /// Keeps the libkrunfw library loaded so kernel memory pointers remain valid.
     _krunfw_library: Option<libloading::Library>,
 }
@@ -64,6 +65,7 @@ impl Vm {
         rlimits: Option<String>,
         krunfw_path: Option<PathBuf>,
         init_path: Option<String>,
+        exit_observers: Vec<Box<dyn Fn() + Send + 'static>>,
     ) -> Self {
         Self {
             vmr,
@@ -75,6 +77,7 @@ impl Vm {
             rlimits,
             krunfw_path,
             init_path,
+            exit_observers,
             _krunfw_library: None,
         }
     }
@@ -139,6 +142,14 @@ impl Vm {
         let _vmm = vmm::builder::build_microvm(&self.vmr, &mut event_manager, shutdown_efd, sender)
             .map_err(|e| Error::Build(BuildError::Start(format!("build_microvm: {e:?}"))))?;
 
+        // Register user exit observers
+        {
+            let mut vmm = _vmm.lock().expect("Poisoned VMM mutex");
+            for observer in self.exit_observers {
+                vmm.add_exit_observer(observer);
+            }
+        }
+
         // Start worker threads if needed
         #[cfg(target_os = "macos")]
         if self.vmr.gpu_virgl_flags.is_some() {
@@ -162,6 +173,11 @@ impl Vm {
                 Ok(_) => {}
                 Err(e) => {
                     error!("Error in EventManager loop: {e:?}");
+                    // Run exit observers before returning so cleanup (terminal
+                    // restore, console reset, user callbacks) still fires.
+                    _vmm.lock()
+                        .expect("Poisoned VMM mutex")
+                        .notify_exit_observers();
                     return Err(Error::Runtime(RuntimeError::EventLoop(format!("{e:?}"))));
                 }
             }
@@ -384,6 +400,7 @@ mod tests {
             None,
             None,
             None,
+            Vec::new(),
         )
     }
 
