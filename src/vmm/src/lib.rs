@@ -16,6 +16,8 @@ extern crate log;
 /// Handles setup and initialization a `Vmm` object.
 pub mod builder;
 pub(crate) mod device_manager;
+/// Cross-platform exit signal handlers (SIGTERM, SIGUSR1).
+pub mod exit_signal;
 /// Resource store for configured microVM resources.
 pub mod resources;
 /// Signal handling utilities.
@@ -362,13 +364,13 @@ impl Vmm {
     ///
     /// Each observer is wrapped in `catch_unwind` so that a panic in one
     /// observer does not prevent subsequent observers from running.
-    pub fn notify_exit_observers(&mut self) {
+    pub fn notify_exit_observers(&mut self, exit_code: i32) {
         for observer in &self.exit_observers {
             let obs = Arc::clone(observer);
             if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 obs.lock()
                     .expect("Poisoned mutex for exit observer")
-                    .on_vmm_exit();
+                    .on_vmm_exit(exit_code);
             })) {
                 error!("Exit observer panicked: {e:?}");
             }
@@ -379,7 +381,7 @@ impl Vmm {
     pub fn stop(&mut self, exit_code: i32) {
         info!("Vmm is stopping.");
 
-        self.notify_exit_observers();
+        self.notify_exit_observers(exit_code);
 
         // Exit from Firecracker using the provided exit code. Safe because we're terminating
         // the process anyway.

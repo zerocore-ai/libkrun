@@ -362,7 +362,7 @@ impl VirtioDevice for Console {
 }
 
 impl VmmExitObserver for Console {
-    fn on_vmm_exit(&mut self) {
+    fn on_vmm_exit(&mut self, _exit_code: i32) {
         self.reset();
         log::trace!("Console on_vmm_exit finished");
     }

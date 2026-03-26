@@ -2,7 +2,11 @@
 
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use devices::virtio::console::port_io::{
+    ConsolePortBackend, ConsolePortBackendInputAdapter, ConsolePortBackendOutputAdapter,
+};
 use vmm::resources::PortConfig;
 
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
@@ -185,7 +189,7 @@ pub enum NetConfig {
 ///             .gpu_shm_size(1 << 28)
 ///     });
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Default)]
 pub struct ConsoleBuilder {
     pub(crate) output: Option<PathBuf>,
     pub(crate) ports: Vec<PortConfig>,
@@ -591,6 +595,31 @@ impl ConsoleBuilder {
     /// Call this to suppress that console when using only explicit ports.
     pub fn disable_implicit(mut self) -> Self {
         self.disable_implicit = true;
+        self
+    }
+
+    /// Add a custom console port backend.
+    ///
+    /// The backend provides bidirectional byte I/O without file descriptors
+    /// on the data path, matching the pattern of
+    /// [`NetBuilder::custom()`](NetBuilder::custom) and
+    /// [`FsBuilder::custom()`](FsBuilder::custom).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// VmBuilder::new()
+    ///     .console(|c| c.custom("agent", Box::new(my_backend)))
+    /// ```
+    pub fn custom(mut self, name: &str, backend: Box<dyn ConsolePortBackend>) -> Self {
+        let backend: Arc<dyn ConsolePortBackend> = Arc::from(backend);
+        let input = Box::new(ConsolePortBackendInputAdapter::new(Arc::clone(&backend)));
+        let output = Box::new(ConsolePortBackendOutputAdapter::new(backend));
+        self.ports.push(PortConfig::Custom {
+            name: name.to_string(),
+            input,
+            output,
+        });
         self
     }
 }
