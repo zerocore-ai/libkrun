@@ -56,7 +56,7 @@ pub fn register_exit_signal_handlers(exit_write_fd: RawFd) -> io::Result<()> {
 
     unsafe {
         let mut sa: libc::sigaction = mem::zeroed();
-        sa.sa_sigaction = exit_signal_handler as usize;
+        sa.sa_sigaction = exit_signal_handler as *const () as usize;
         sa.sa_flags = libc::SA_SIGINFO;
 
         if libc::sigaction(libc::SIGTERM, &sa, ptr::null_mut()) != 0 {

@@ -42,11 +42,11 @@ pub use api::builder::VmBuilder;
 pub use api::builders::DiskBuilder;
 #[cfg(feature = "blk")]
 pub use api::builders::DiskImageFormat;
-pub use api::exit_handle::ExitHandle;
 #[cfg(feature = "net")]
 pub use api::builders::NetBuilder;
 pub use api::builders::{ConsoleBuilder, ExecBuilder, FsBuilder, KernelBuilder, MachineBuilder};
 pub use api::error::{BuildError, ConfigError, Error, Result, RuntimeError};
+pub use api::exit_handle::ExitHandle;
 pub use api::vm::Vm;
 
 pub use backends::console::ConsolePortBackend;

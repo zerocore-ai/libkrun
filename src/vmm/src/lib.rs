@@ -16,10 +16,10 @@ extern crate log;
 /// Handles setup and initialization a `Vmm` object.
 pub mod builder;
 pub(crate) mod device_manager;
-/// Resource store for configured microVM resources.
-pub mod resources;
 /// Cross-platform exit signal handlers (SIGTERM, SIGUSR1).
 pub mod exit_signal;
+/// Resource store for configured microVM resources.
+pub mod resources;
 /// Signal handling utilities.
 #[cfg(target_os = "linux")]
 pub mod signal_handler;
