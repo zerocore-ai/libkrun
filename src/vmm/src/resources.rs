@@ -100,7 +100,6 @@ pub enum VirtioConsoleConfigMode {
     Explicit(Vec<PortConfig>),
 }
 
-#[derive(Debug, Clone)]
 pub enum PortConfig {
     Tty {
         name: String,
@@ -110,6 +109,11 @@ pub enum PortConfig {
         name: String,
         input_fd: RawFd,
         output_fd: RawFd,
+    },
+    Custom {
+        name: String,
+        input: Box<dyn devices::virtio::port_io::PortInput + Send>,
+        output: Box<dyn devices::virtio::port_io::PortOutput + Send>,
     },
 }
 

@@ -36,8 +36,8 @@ fn main() -> Result<()> {
                 .args(["Hello from libkrun VM!"])
                 .env("HOME", "/root")
         })
-        .on_exit(|| {
-            eprintln!("[on_exit] VM is shutting down — cleanup complete");
+        .on_exit(|exit_code| {
+            eprintln!("[on_exit] VM exiting with code {exit_code}");
         })
         .build()?
         .enter()?;

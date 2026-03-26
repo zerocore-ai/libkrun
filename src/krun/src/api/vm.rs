@@ -2,6 +2,8 @@
 
 use std::convert::Infallible;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicI32;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 #[cfg(target_os = "linux")]
@@ -19,6 +21,7 @@ use vmm::vmm_config::kernel_cmdline::KernelCmdlineConfig;
 use vmm::vmm_config::vsock::VsockDeviceConfig;
 
 use super::error::{BuildError, Error, Result, RuntimeError};
+use super::exit_handle::ExitHandle;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -43,7 +46,11 @@ pub struct Vm {
     rlimits: Option<String>,
     krunfw_path: Option<PathBuf>,
     init_path: Option<String>,
-    exit_observers: Vec<Box<dyn Fn() + Send + 'static>>,
+    exit_observers: Vec<Box<dyn Fn(i32) + Send + 'static>>,
+    /// Pre-created exit event fd for triggering VM shutdown.
+    exit_evt: EventFd,
+    /// Shared exit code — written by the VMM, readable by exit observers.
+    exit_code: Arc<AtomicI32>,
     /// Keeps the libkrunfw library loaded so kernel memory pointers remain valid.
     _krunfw_library: Option<libloading::Library>,
 }
@@ -65,7 +72,9 @@ impl Vm {
         rlimits: Option<String>,
         krunfw_path: Option<PathBuf>,
         init_path: Option<String>,
-        exit_observers: Vec<Box<dyn Fn() + Send + 'static>>,
+        exit_observers: Vec<Box<dyn Fn(i32) + Send + 'static>>,
+        exit_evt: EventFd,
+        exit_code: Arc<AtomicI32>,
     ) -> Self {
         Self {
             vmr,
@@ -78,8 +87,30 @@ impl Vm {
             krunfw_path,
             init_path,
             exit_observers,
+            exit_evt,
+            exit_code,
             _krunfw_library: None,
         }
+    }
+
+    /// Get a cloneable handle that triggers VM exit from any thread.
+    ///
+    /// Must be called **before** [`enter()`](Self::enter). Background tasks
+    /// use this to shut down the VMM (e.g. idle timeout, max duration).
+    pub fn exit_handle(&self) -> ExitHandle {
+        ExitHandle::from_event_fd(&self.exit_evt)
+            .expect("Failed to create ExitHandle from exit EventFd")
+    }
+
+    /// Get a shared reference to the VM exit code.
+    ///
+    /// The VMM writes the guest exit code here before invoking exit
+    /// observers. Read it inside an [`on_exit`](super::builder::VmBuilder::on_exit)
+    /// closure to record the exit status.
+    ///
+    /// Sentinel value `i32::MAX` means "not yet set".
+    pub fn exit_code(&self) -> Arc<AtomicI32> {
+        Arc::clone(&self.exit_code)
     }
 
     /// Start the VM. This call never returns on success — the VMM calls
@@ -139,8 +170,15 @@ impl Vm {
         // Build the microVM
         let (sender, _receiver) = unbounded();
 
-        let _vmm = vmm::builder::build_microvm(&self.vmr, &mut event_manager, shutdown_efd, sender)
-            .map_err(|e| Error::Build(BuildError::Start(format!("build_microvm: {e:?}"))))?;
+        let _vmm = vmm::builder::build_microvm(
+            &mut self.vmr,
+            &mut event_manager,
+            shutdown_efd,
+            sender,
+            self.exit_evt,
+            self.exit_code,
+        )
+        .map_err(|e| Error::Build(BuildError::Start(format!("build_microvm: {e:?}"))))?;
 
         // Register user exit observers
         {
@@ -177,7 +215,7 @@ impl Vm {
                     // restore, console reset, user callbacks) still fires.
                     _vmm.lock()
                         .expect("Poisoned VMM mutex")
-                        .notify_exit_observers();
+                        .notify_exit_observers(1);
                     return Err(Error::Runtime(RuntimeError::EventLoop(format!("{e:?}"))));
                 }
             }
@@ -386,6 +424,7 @@ fn load_krunfw_library(path: Option<&std::path::Path>) -> Result<KrunfwBindings>
 mod tests {
     use super::*;
     use devices::virtio::TsiFlags;
+    use utils::eventfd::EFD_NONBLOCK;
     #[cfg(not(feature = "tee"))]
     use vmm::vmm_config::fs::FsDeviceConfig;
 
@@ -401,6 +440,8 @@ mod tests {
             None,
             None,
             Vec::new(),
+            EventFd::new(EFD_NONBLOCK).unwrap(),
+            Arc::new(AtomicI32::new(i32::MAX)),
         )
     }
 

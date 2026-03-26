@@ -3,6 +3,12 @@
 //! This module provides traits and types for implementing custom backends
 //! for libkrun's virtio devices.
 //!
+//! # Console Backends
+//!
+//! The `console` module provides the [`ConsolePortBackend`] trait for
+//! in-process virtio-console port backends. See [`console::ConsolePortBackend`]
+//! for details.
+//!
 //! # Network Backends
 //!
 //! The `net` module re-exports the `NetBackend` trait which allows custom
@@ -17,6 +23,8 @@
 // Modules
 //--------------------------------------------------------------------------------------------------
 
+pub mod console;
+
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 pub mod fs;
 
@@ -26,6 +34,8 @@ pub mod net;
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
+
+pub use console::ConsolePortBackend;
 
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 pub use fs::DynFileSystem;

@@ -34,8 +34,7 @@ use std::os::fd::{BorrowedFd, FromRawFd, RawFd};
 use std::path::PathBuf;
 use std::slice;
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::LazyLock;
-use std::sync::Mutex;
+use std::sync::{Arc, LazyLock, Mutex};
 use utils::eventfd::EventFd;
 use vmm::resources::{
     DefaultVirtioConsoleConfig, PortConfig, SerialConsoleConfig, TsiFlags, VirtioConsoleConfigMode,
@@ -2696,11 +2695,22 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
 
     let (sender, _receiver) = unbounded();
 
+    let exit_evt = match utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK) {
+        Ok(evt) => evt,
+        Err(e) => {
+            error!("Failed to create exit EventFd: {e:?}");
+            return -libc::EINVAL;
+        }
+    };
+    let exit_code = Arc::new(AtomicI32::new(i32::MAX));
+
     let _vmm = match vmm::builder::build_microvm(
-        &ctx_cfg.vmr,
+        &mut ctx_cfg.vmr,
         &mut event_manager,
         ctx_cfg.shutdown_efd,
         sender,
+        exit_evt,
+        exit_code,
     ) {
         Ok(vmm) => vmm,
         Err(e) => {

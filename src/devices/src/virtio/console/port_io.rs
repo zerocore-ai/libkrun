@@ -159,6 +159,118 @@ impl PortOutput for PortOutputFd {
     }
 }
 
+//--------------------------------------------------------------------------------------------------
+// Types: Custom Console Port Backend Adapters
+//--------------------------------------------------------------------------------------------------
+
+use std::sync::Arc;
+
+/// Trait for custom virtio-console port backends.
+///
+/// Implementors provide bidirectional byte I/O between the host and guest
+/// without going through file descriptors on the data path. The console
+/// device's RX thread calls [`read`](Self::read) and the TX thread calls
+/// [`write`](Self::write) — both via `&self`, so the implementation must
+/// use interior mutability (e.g. lock-free ring buffers).
+///
+/// [`read_wake_fd`](Self::read_wake_fd) returns a file descriptor that
+/// becomes readable when [`read`](Self::read) would return data. The
+/// console RX thread uses this fd in a `poll()` call to block efficiently.
+pub trait ConsolePortBackend: Send + Sync {
+    /// Read bytes destined for the guest (host → guest direction).
+    ///
+    /// Copies up to `buf.len()` bytes into `buf`. Returns the number of
+    /// bytes written, or `WouldBlock` if no data is available.
+    fn read(&self, buf: &mut [u8]) -> io::Result<usize>;
+
+    /// Write bytes from the guest (guest → host direction).
+    ///
+    /// Accepts up to `buf.len()` bytes. Returns the number of bytes
+    /// consumed, or `WouldBlock` if the backend cannot accept data.
+    fn write(&self, buf: &[u8]) -> io::Result<usize>;
+
+    /// File descriptor that becomes readable when [`read`](Self::read) has data.
+    ///
+    /// Used by the console RX thread for `poll()`-based blocking. Typically
+    /// the read end of a wake pipe.
+    fn read_wake_fd(&self) -> RawFd;
+}
+
+/// Adapter that wraps a [`ConsolePortBackend`] as a [`PortInput`].
+///
+/// Used by the console RX thread to read data from the backend into guest
+/// memory via VolatileSlice.
+pub struct ConsolePortBackendInputAdapter {
+    backend: Arc<dyn ConsolePortBackend>,
+}
+
+impl ConsolePortBackendInputAdapter {
+    pub fn new(backend: Arc<dyn ConsolePortBackend>) -> Self {
+        Self { backend }
+    }
+}
+
+impl PortInput for ConsolePortBackendInputAdapter {
+    fn read_volatile(&mut self, buf: &mut VolatileSlice) -> io::Result<usize> {
+        let guard = buf.ptr_guard_mut();
+
+        // SAFETY: The VolatileSlice invariant guarantees the memory region is
+        // valid for writes of `buf.len()` bytes for the lifetime of the guard.
+        let dst = unsafe { std::slice::from_raw_parts_mut(guard.as_ptr(), buf.len()) };
+
+        let n = self.backend.read(dst)?;
+
+        if n > 0 {
+            buf.bitmap().mark_dirty(0, n);
+        }
+
+        Ok(n)
+    }
+
+    fn wait_until_readable(&self, stopfd: Option<&EventFd>) {
+        let wake_fd = self.backend.read_wake_fd();
+        let mut poll_fds = Vec::with_capacity(2);
+        let wake_bfd = unsafe { BorrowedFd::borrow_raw(wake_fd) };
+        poll_fds.push(PollFd::new(wake_bfd, PollFlags::POLLIN));
+        if let Some(stopfd) = stopfd {
+            let stop_bfd = unsafe { BorrowedFd::borrow_raw(stopfd.as_raw_fd()) };
+            poll_fds.push(PollFd::new(stop_bfd, PollFlags::POLLIN));
+        }
+        poll(&mut poll_fds, PollTimeout::NONE).expect("Failed to poll");
+    }
+}
+
+/// Adapter that wraps a [`ConsolePortBackend`] as a [`PortOutput`].
+///
+/// Used by the console TX thread to write guest data to the backend.
+pub struct ConsolePortBackendOutputAdapter {
+    backend: Arc<dyn ConsolePortBackend>,
+}
+
+impl ConsolePortBackendOutputAdapter {
+    pub fn new(backend: Arc<dyn ConsolePortBackend>) -> Self {
+        Self { backend }
+    }
+}
+
+impl PortOutput for ConsolePortBackendOutputAdapter {
+    fn write_volatile(&mut self, buf: &VolatileSlice) -> io::Result<usize> {
+        let guard = buf.ptr_guard();
+
+        // SAFETY: The VolatileSlice invariant guarantees the memory region is
+        // valid for reads of `buf.len()` bytes for the lifetime of the guard.
+        let src = unsafe { std::slice::from_raw_parts(guard.as_ptr(), buf.len()) };
+
+        self.backend.write(src)
+    }
+
+    fn wait_until_writable(&self) {
+        // Ring buffer push is lock-free and practically instant. If the ring
+        // is full, write() returns WouldBlock and the console TX thread's
+        // existing retry loop handles backpressure.
+    }
+}
+
 fn dup_raw_fd_into_owned(raw_fd: RawFd) -> Result<OwnedFd, nix::Error> {
     // SAFETY: if raw_fd is invalid the `dup` call below will fail
     let borrowed_fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };

@@ -30,6 +30,7 @@
 pub mod builder;
 pub mod builders;
 pub mod error;
+pub mod exit_handle;
 pub mod vm;
 
 //--------------------------------------------------------------------------------------------------
@@ -45,4 +46,5 @@ pub use builders::DiskImageFormat;
 pub use builders::NetBuilder;
 pub use builders::{ConsoleBuilder, ExecBuilder, FsBuilder, KernelBuilder, MachineBuilder};
 pub use error::{BuildError, ConfigError, Error, Result, RuntimeError};
+pub use exit_handle::ExitHandle;
 pub use vm::Vm;

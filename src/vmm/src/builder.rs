@@ -51,6 +51,7 @@ use devices::virtio::{port_io, MmioTransport, PortDescription, VirtioDevice, Vso
 use kbs_types::Tee;
 
 use crate::device_manager;
+use crate::exit_signal::register_exit_signal_handlers;
 #[cfg(target_os = "linux")]
 use crate::signal_handler::register_sigint_handler;
 #[cfg(target_os = "linux")]
@@ -561,10 +562,12 @@ fn choose_payload(vm_resources: &VmResources) -> Result<Payload, StartMicrovmErr
 /// An `Arc` reference of the built `Vmm` is also plugged in the `EventManager`, while another
 /// is returned.
 pub fn build_microvm(
-    vm_resources: &super::resources::VmResources,
+    vm_resources: &mut super::resources::VmResources,
     event_manager: &mut EventManager,
     _shutdown_efd: Option<EventFd>,
     _sender: Sender<WorkerMessage>,
+    exit_evt: EventFd,
+    exit_code: Arc<AtomicI32>,
 ) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
     let payload = choose_payload(vm_resources)?;
 
@@ -766,7 +769,15 @@ pub fn build_microvm(
         serial_devices.push(setup_serial_device(event_manager, input, output)?);
     }
 
-    let exit_evt = EventFd::new(utils::eventfd::EFD_NONBLOCK)
+    // Register signal handlers with the pre-created exit EventFd.
+    // On Linux eventfd is a single fd (read/write on the same fd).
+    // On macOS EventFd is a pipe pair — we need the write end.
+    #[cfg(target_os = "linux")]
+    let exit_write_fd = exit_evt.as_raw_fd();
+    #[cfg(target_os = "macos")]
+    let exit_write_fd = exit_evt.get_write_fd();
+
+    register_exit_signal_handlers(exit_write_fd)
         .map_err(Error::EventFd)
         .map_err(StartMicrovmError::Internal)?;
 
@@ -947,8 +958,7 @@ pub fn build_microvm(
         )?;
     }
 
-    // We use this atomic to record the exit code set by init/init.c in the VM.
-    let exit_code = Arc::new(AtomicI32::new(i32::MAX));
+    // exit_code is pre-created and shared with callers via Vm::exit_code().
 
     let mut vmm = Vmm {
         guest_memory,
@@ -986,7 +996,7 @@ pub fn build_microvm(
         console_id += 1;
     }
 
-    for console_cfg in vm_resources.virtio_consoles.iter() {
+    for console_cfg in std::mem::take(&mut vm_resources.virtio_consoles) {
         attach_console_devices(
             &mut vmm,
             event_manager,
@@ -2118,7 +2128,7 @@ fn setup_terminal_raw_mode(
         match term_set_raw_mode(term_fd, handle_signals_by_terminal) {
             Ok(old_mode) => {
                 let raw_fd = term_fd.as_raw_fd();
-                vmm.exit_observers.push(Arc::new(Mutex::new(move || {
+                vmm.exit_observers.push(Arc::new(Mutex::new(move |_: i32| {
                     if let Err(e) =
                         term_restore_mode(unsafe { BorrowedFd::borrow_raw(raw_fd) }, &old_mode)
                     {
@@ -2135,22 +2145,22 @@ fn setup_terminal_raw_mode(
 
 fn create_explicit_ports(
     vmm: &mut Vmm,
-    port_configs: &[PortConfig],
+    port_configs: Vec<PortConfig>,
 ) -> std::result::Result<Vec<PortDescription>, StartMicrovmError> {
     let mut ports = Vec::with_capacity(port_configs.len());
 
     for port_cfg in port_configs {
         let port_desc = match port_cfg {
             PortConfig::Tty { name, tty_fd } => {
-                assert!(*tty_fd > 0, "PortConfig::Tty must have a valid tty_fd");
-                let term_fd = unsafe { BorrowedFd::borrow_raw(*tty_fd) };
+                assert!(tty_fd > 0, "PortConfig::Tty must have a valid tty_fd");
+                let term_fd = unsafe { BorrowedFd::borrow_raw(tty_fd) };
                 setup_terminal_raw_mode(vmm, Some(term_fd), false);
 
                 PortDescription {
-                    name: name.clone().into(),
-                    input: Some(port_io::input_to_raw_fd_dup(*tty_fd).unwrap()),
-                    output: Some(port_io::output_to_raw_fd_dup(*tty_fd).unwrap()),
-                    terminal: Some(port_io::term_fd(*tty_fd).unwrap()),
+                    name: name.into(),
+                    input: Some(port_io::input_to_raw_fd_dup(tty_fd).unwrap()),
+                    output: Some(port_io::output_to_raw_fd_dup(tty_fd).unwrap()),
+                    terminal: Some(port_io::term_fd(tty_fd).unwrap()),
                 }
             }
             PortConfig::InOut {
@@ -2158,17 +2168,27 @@ fn create_explicit_ports(
                 input_fd,
                 output_fd,
             } => PortDescription {
-                name: name.clone().into(),
-                input: if *input_fd < 0 {
+                name: name.into(),
+                input: if input_fd < 0 {
                     None
                 } else {
-                    Some(port_io::input_to_raw_fd_dup(*input_fd).unwrap())
+                    Some(port_io::input_to_raw_fd_dup(input_fd).unwrap())
                 },
-                output: if *output_fd < 0 {
+                output: if output_fd < 0 {
                     None
                 } else {
-                    Some(port_io::output_to_raw_fd_dup(*output_fd).unwrap())
+                    Some(port_io::output_to_raw_fd_dup(output_fd).unwrap())
                 },
+                terminal: None,
+            },
+            PortConfig::Custom {
+                name,
+                input,
+                output,
+            } => PortDescription {
+                name: name.into(),
+                input: Some(input),
+                output: Some(output),
                 terminal: None,
             },
         };
@@ -2184,7 +2204,7 @@ fn attach_console_devices(
     event_manager: &mut EventManager,
     intc: IrqChip,
     vm_resources: &VmResources,
-    cfg: Option<&VirtioConsoleConfigMode>,
+    cfg: Option<VirtioConsoleConfigMode>,
     id_number: u32,
 ) -> std::result::Result<(), StartMicrovmError> {
     use self::StartMicrovmError::*;
@@ -2196,7 +2216,7 @@ fn attach_console_devices(
         Some(VirtioConsoleConfigMode::Autoconfigure(autocfg)) => autoconfigure_console_ports(
             vmm,
             vm_resources,
-            Some(autocfg),
+            Some(&autocfg),
             creating_implicit_console,
         )?,
         Some(VirtioConsoleConfigMode::Explicit(ports)) => create_explicit_ports(vmm, ports)?,

@@ -167,13 +167,16 @@ pub trait VirtioDevice: AsAny + Send {
 }
 
 pub trait VmmExitObserver: Send {
-    /// Callback to finish processing or cleanup the device resources
-    fn on_vmm_exit(&mut self) {}
+    /// Callback to finish processing or cleanup the device resources.
+    ///
+    /// `exit_code` is the final exit code chosen by the VMM (from guest
+    /// vCPU or the shared `exit_code` Arc).
+    fn on_vmm_exit(&mut self, _exit_code: i32) {}
 }
 
-impl<F: Fn() + Send> VmmExitObserver for F {
-    fn on_vmm_exit(&mut self) {
-        self()
+impl<F: Fn(i32) + Send> VmmExitObserver for F {
+    fn on_vmm_exit(&mut self, exit_code: i32) {
+        self(exit_code)
     }
 }
 

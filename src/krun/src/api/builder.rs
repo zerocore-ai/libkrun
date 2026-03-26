@@ -1,8 +1,12 @@
 //! VM Builder for creating and configuring microVMs using nested builders.
 
+use std::sync::atomic::AtomicI32;
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use std::sync::Arc;
+#[cfg(any(feature = "tee", feature = "aws-nitro"))]
+use std::sync::Arc;
 
+use utils::eventfd::{EventFd, EFD_NONBLOCK};
 use vmm::resources::{VirtioConsoleConfigMode, VmResources};
 use vmm::vmm_config::machine_config::VmConfig;
 use vmm::vmm_config::machine_config::VmConfigError;
@@ -20,7 +24,7 @@ use super::builders::{ConsoleBuilder, ExecBuilder, FsBuilder, KernelBuilder, Mac
 #[cfg(feature = "net")]
 use super::builders::{NetBuilder, NetConfig};
 
-use super::error::{ConfigError, Error, Result};
+use super::error::{BuildError, ConfigError, Error, Result};
 use super::vm::Vm;
 
 #[cfg(feature = "blk")]
@@ -68,7 +72,7 @@ pub struct VmBuilder {
     net: NetBuilder,
     #[cfg(feature = "blk")]
     disk: DiskBuilder,
-    exit_observers: Vec<Box<dyn Fn() + Send + 'static>>,
+    exit_observers: Vec<Box<dyn Fn(i32) + Send + 'static>>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -258,11 +262,12 @@ impl VmBuilder {
     /// ```rust,no_run
     /// # use msb_krun::VmBuilder;
     /// VmBuilder::new()
-    ///     .on_exit(|| {
+    ///     .on_exit(|exit_code| {
     ///         // flush logs, write final status, etc.
+    ///         eprintln!("VM exited with code {exit_code}");
     ///     });
     /// ```
-    pub fn on_exit(mut self, f: impl Fn() + Send + 'static) -> Self {
+    pub fn on_exit(mut self, f: impl Fn(i32) + Send + 'static) -> Self {
         self.exit_observers.push(Box::new(f));
         self
     }
@@ -488,6 +493,10 @@ impl VmBuilder {
             )
         };
 
+        let exit_evt = EventFd::new(EFD_NONBLOCK)
+            .map_err(|e| Error::Build(BuildError::Start(format!("exit EventFd: {e:?}"))))?;
+        let exit_code = Arc::new(AtomicI32::new(i32::MAX));
+
         Ok(Vm::new(
             vmr,
             self.kernel.cmdline,
@@ -499,6 +508,8 @@ impl VmBuilder {
             self.kernel.krunfw_path,
             self.kernel.init_path,
             self.exit_observers,
+            exit_evt,
+            exit_code,
         ))
     }
 }
