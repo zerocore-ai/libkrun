@@ -26,7 +26,7 @@ pub const HIMEM_START: u64 = 0x0010_0000; //1 MB.
 /// First usable IRQ ID for virtio device interrupts on x86_64.
 pub const IRQ_BASE: u32 = 5;
 /// Last usable IRQ ID for virtio device interrupts on x86_64.
-pub const IRQ_MAX: u32 = 15;
+pub const IRQ_MAX: u32 = 223;
 
 /// Address for the TSS setup.
 pub const KVM_TSS_ADDRESS: u64 = 0xfffb_d000;

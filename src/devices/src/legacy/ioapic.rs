@@ -17,7 +17,7 @@ use crate::Error as DeviceError;
 
 const IOAPIC_BASE: u32 = 0xfec0_0000;
 const APIC_DEFAULT_ADDRESS: u32 = 0xfee0_0000;
-const IOAPIC_NUM_PINS: usize = 24;
+const IOAPIC_NUM_PINS: usize = 256;
 
 const IO_REG_SEL: u64 = 0x00;
 const IO_WIN: u64 = 0x10;

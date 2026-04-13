@@ -819,19 +819,16 @@ pub fn build_microvm(
     // while on aarch64 we need to do it the other way around.
     #[cfg(target_arch = "x86_64")]
     {
-        let ioapic: Box<dyn IrqChipT> = if vm_resources.split_irqchip {
-            Box::new(
-                IoApic::new(vm.fd(), _sender.clone())
-                    .map_err(StartMicrovmError::CreateKvmIrqChip)?,
-            )
-        } else {
-            Box::new(KvmIoapic::new(vm.fd()).map_err(StartMicrovmError::CreateKvmIrqChip)?)
-        };
+        // Always use split irqchip on x86_64 to support 224 IRQ lines (0-223).
+        let ioapic: Box<dyn IrqChipT> = Box::new(
+            IoApic::new(vm.fd(), _sender.clone())
+                .map_err(StartMicrovmError::CreateKvmIrqChip)?,
+        );
         intc = Arc::new(Mutex::new(IrqChipDevice::new(ioapic)));
 
         attach_legacy_devices(
             &vm,
-            vm_resources.split_irqchip,
+            true,
             &mut pio_device_manager,
             &mut mmio_device_manager,
             Some(intc.clone()),
