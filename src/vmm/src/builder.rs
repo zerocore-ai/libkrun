@@ -821,8 +821,7 @@ pub fn build_microvm(
     {
         // Always use split irqchip on x86_64 to support 224 IRQ lines (0-223).
         let ioapic: Box<dyn IrqChipT> = Box::new(
-            IoApic::new(vm.fd(), _sender.clone())
-                .map_err(StartMicrovmError::CreateKvmIrqChip)?,
+            IoApic::new(vm.fd(), _sender.clone()).map_err(StartMicrovmError::CreateKvmIrqChip)?,
         );
         intc = Arc::new(Mutex::new(IrqChipDevice::new(ioapic)));
 

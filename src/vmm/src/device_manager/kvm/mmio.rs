@@ -443,7 +443,7 @@ mod tests {
         #[cfg(target_arch = "aarch64")]
         let _gic = KvmGicV3::new(vm.fd(), 1).unwrap();
 
-        let mut cmdline = kernel_cmdline::Cmdline::new(4096);
+        let mut cmdline = kernel_cmdline::Cmdline::new(16384);
 
         for _i in arch::IRQ_BASE..=arch::IRQ_MAX {
             device_manager
