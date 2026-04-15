@@ -33,8 +33,6 @@ use crate::vmm_config::net::NetBuilder;
 use devices::legacy::Cmos;
 #[cfg(all(target_os = "linux", target_arch = "riscv64"))]
 use devices::legacy::KvmAia;
-#[cfg(target_arch = "x86_64")]
-use devices::legacy::KvmIoapic;
 use devices::legacy::Serial;
 #[cfg(target_os = "macos")]
 use devices::legacy::VcpuList;
