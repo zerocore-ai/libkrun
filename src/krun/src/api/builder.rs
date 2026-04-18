@@ -332,6 +332,7 @@ impl VmBuilder {
         vmr.set_vm_config(&vm_config)
             .map_err(|err| map_vm_config_error(&self.machine, err))?;
         vmr.nested_enabled = self.machine.nested_virt;
+        vmr.split_irqchip = self.machine.split_irqchip;
 
         // Apply filesystem configuration
         #[cfg(not(feature = "tee"))]

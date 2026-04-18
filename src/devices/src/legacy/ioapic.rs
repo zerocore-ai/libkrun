@@ -114,7 +114,9 @@ impl IoApic {
                 cap: KVM_CAP_SPLIT_IRQCHIP,
                 ..Default::default()
             };
-            cap.args[0] = 24;
+            // args[0] is the number of GSIs reserved for the userspace IOAPIC;
+            // must match the emulated IOAPIC's pin count.
+            cap.args[0] = IOAPIC_NUM_PINS as u64;
             vm.enable_cap(&cap)?;
         }
 

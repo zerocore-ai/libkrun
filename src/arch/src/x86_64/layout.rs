@@ -25,8 +25,12 @@ pub const HIMEM_START: u64 = 0x0010_0000; //1 MB.
 // Typically, on x86 systems 16 IRQs are used (0-15).
 /// First usable IRQ ID for virtio device interrupts on x86_64.
 pub const IRQ_BASE: u32 = 5;
-/// Last usable IRQ ID for virtio device interrupts on x86_64.
-pub const IRQ_MAX: u32 = 223;
+/// Last usable IRQ ID for virtio device interrupts on x86_64 when using
+/// KVM's in-kernel IOAPIC (hardcoded to 24 pins by KVM_IOAPIC_NUM_PINS).
+pub const IRQ_MAX: u32 = 15;
+/// Last usable IRQ ID when using the userspace split irqchip, which
+/// emulates an IOAPIC with `IOAPIC_NUM_PINS` redirection entries.
+pub const IRQ_MAX_SPLIT: u32 = 223;
 
 /// Address for the TSS setup.
 pub const KVM_TSS_ADDRESS: u64 = 0xfffb_d000;

@@ -42,6 +42,7 @@ pub struct MachineBuilder {
     pub(crate) memory_mib: usize,
     pub(crate) hyperthreading: bool,
     pub(crate) nested_virt: bool,
+    pub(crate) split_irqchip: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -296,6 +297,7 @@ impl MachineBuilder {
             memory_mib: 512,
             hyperthreading: false,
             nested_virt: false,
+            split_irqchip: false,
         }
     }
 
@@ -320,6 +322,19 @@ impl MachineBuilder {
     /// Enable or disable nested virtualization.
     pub fn nested_virt(mut self, enabled: bool) -> Self {
         self.nested_virt = enabled;
+        self
+    }
+
+    /// Enable the userspace split irqchip on x86_64.
+    ///
+    /// The default in-kernel IOAPIC is hardcoded by KVM to 24 pins, leaving
+    /// only 11 IRQs for virtio-mmio devices. The userspace split irqchip
+    /// emulates a larger IOAPIC (256 pins) and raises the usable range to
+    /// 219 IRQs, which is needed for VMs with many virtio-mmio devices
+    /// (e.g. lots of virtio-fs mounts or block devices). No effect on
+    /// aarch64 or riscv64.
+    pub fn split_irqchip(mut self, enabled: bool) -> Self {
+        self.split_irqchip = enabled;
         self
     }
 }
