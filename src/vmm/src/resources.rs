@@ -189,6 +189,11 @@ pub struct VmResources {
     pub nested_enabled: bool,
     /// Whether to enable split irqchip
     pub split_irqchip: bool,
+    /// Force-enable the virtio-vsock device even when no TSI transport is
+    /// required. When `false`, vsock is only attached if `configure_vsock`
+    /// determines it is needed (HIJACK_INET when there's no virtio-net, or
+    /// HIJACK_UNIX when there's a single root virtio-fs on Linux).
+    pub request_vsock: bool,
     /// Do not create an implicit console device in the guest
     pub disable_implicit_console: bool,
     /// The console id to use for console= in the kernel cmdline
@@ -437,6 +442,7 @@ mod tests {
             smbios_oem_strings: None,
             nested_enabled: false,
             split_irqchip: false,
+            request_vsock: false,
             disable_implicit_console: false,
             serial_consoles: Vec::new(),
             virtio_consoles: Vec::new(),

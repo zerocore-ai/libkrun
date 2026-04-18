@@ -256,7 +256,13 @@ impl Vm {
         Ok(())
     }
 
-    /// Configure vsock device.
+    /// Configure the vsock device.
+    ///
+    /// The device is only attached when actually needed — either because the
+    /// caller explicitly requested it (`VmBuilder::vsock(true)`), or because
+    /// TSI needs it as a transport (no virtio-net → HIJACK_INET; single root
+    /// virtio-fs on Linux → HIJACK_UNIX). This keeps the per-VM IRQ/MMIO
+    /// budget free when nothing actually uses vsock.
     fn configure_vsock(&mut self) -> Result<()> {
         use devices::virtio::TsiFlags;
 
@@ -277,6 +283,10 @@ impl Vm {
         #[cfg(not(feature = "tee"))]
         {
             tsi_flags = self.maybe_enable_hijack_unix(tsi_flags);
+        }
+
+        if !self.vmr.request_vsock && tsi_flags.is_empty() {
+            return Ok(());
         }
 
         let vsock_config = VsockDeviceConfig {
