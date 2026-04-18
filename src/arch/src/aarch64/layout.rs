@@ -75,7 +75,7 @@ pub const FDT_MAX_SIZE: usize = 0x20_0000;
 pub const IRQ_BASE: u32 = 32;
 
 /// Last usable interrupt on aarch64.
-pub const IRQ_MAX: u32 = 159;
+pub const IRQ_MAX: u32 = 223;
 
 /// Timer interrupts
 pub const GTIMER_SEC: u32 = 13;

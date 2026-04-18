@@ -33,15 +33,13 @@ use crate::vmm_config::net::NetBuilder;
 use devices::legacy::Cmos;
 #[cfg(all(target_os = "linux", target_arch = "riscv64"))]
 use devices::legacy::KvmAia;
-#[cfg(target_arch = "x86_64")]
-use devices::legacy::KvmIoapic;
 use devices::legacy::Serial;
 #[cfg(target_os = "macos")]
 use devices::legacy::VcpuList;
 #[cfg(target_os = "macos")]
 use devices::legacy::{GicV3, HvfGicV3};
 #[cfg(target_arch = "x86_64")]
-use devices::legacy::{IoApic, IrqChipT};
+use devices::legacy::{IoApic, IrqChipT, KvmIoapic};
 use devices::legacy::{IrqChip, IrqChipDevice};
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 use devices::legacy::{KvmGicV2, KvmGicV3};
@@ -801,10 +799,18 @@ pub fn build_microvm(
     // Instantiate the MMIO device manager.
     // 'mmio_base' address has to be an address which is protected by the kernel
     // and is architectural specific.
+    #[cfg(target_arch = "x86_64")]
+    let irq_max = if vm_resources.split_irqchip {
+        arch::IRQ_MAX_SPLIT
+    } else {
+        arch::IRQ_MAX
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let irq_max = arch::IRQ_MAX;
     #[allow(unused_mut)]
     let mut mmio_device_manager = MMIODeviceManager::new(
         &mut (arch::MMIO_MEM_START.clone()),
-        (arch::IRQ_BASE, arch::IRQ_MAX),
+        (arch::IRQ_BASE, irq_max),
     );
 
     #[cfg(target_os = "macos")]
@@ -819,6 +825,8 @@ pub fn build_microvm(
     // while on aarch64 we need to do it the other way around.
     #[cfg(target_arch = "x86_64")]
     {
+        // Userspace split irqchip is required for >11 virtio IRQs, since KVM's
+        // in-kernel IOAPIC is hardcoded at 24 pins (KVM_IOAPIC_NUM_PINS).
         let ioapic: Box<dyn IrqChipT> = if vm_resources.split_irqchip {
             Box::new(
                 IoApic::new(vm.fd(), _sender.clone())

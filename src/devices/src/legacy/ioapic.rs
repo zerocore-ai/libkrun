@@ -17,7 +17,7 @@ use crate::Error as DeviceError;
 
 const IOAPIC_BASE: u32 = 0xfec0_0000;
 const APIC_DEFAULT_ADDRESS: u32 = 0xfee0_0000;
-const IOAPIC_NUM_PINS: usize = 24;
+const IOAPIC_NUM_PINS: usize = 256;
 
 const IO_REG_SEL: u64 = 0x00;
 const IO_WIN: u64 = 0x10;
@@ -114,7 +114,9 @@ impl IoApic {
                 cap: KVM_CAP_SPLIT_IRQCHIP,
                 ..Default::default()
             };
-            cap.args[0] = 24;
+            // args[0] is the number of GSIs reserved for the userspace IOAPIC;
+            // must match the emulated IOAPIC's pin count.
+            cap.args[0] = IOAPIC_NUM_PINS as u64;
             vm.enable_cap(&cap)?;
         }
 

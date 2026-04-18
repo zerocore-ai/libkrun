@@ -57,7 +57,9 @@ impl KvmGicV3 {
         };
         device_fd.set_device_attr(&attr)?;
 
-        let nr_irqs: u32 = arch::aarch64::layout::IRQ_MAX - arch::aarch64::layout::IRQ_BASE + 1;
+        // GIC nr_irqs includes 32 private interrupts (SGIs + PPIs), so we need
+        // the SPI count plus 32, rounded up to a multiple of 32.
+        let nr_irqs: u32 = (arch::aarch64::layout::IRQ_MAX + 1).div_ceil(32) * 32;
         let nr_irqs_ptr = &nr_irqs as *const u32;
         let attr = kvm_bindings::kvm_device_attr {
             group: kvm_bindings::KVM_DEV_ARM_VGIC_GRP_NR_IRQS,
