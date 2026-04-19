@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #[cfg(target_arch = "x86")]
-use std::arch::x86::{__cpuid_count, __get_cpuid_max, CpuidResult};
+use std::arch::x86::{CpuidResult, __cpuid_count, __get_cpuid_max};
 #[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::{__cpuid_count, __get_cpuid_max, CpuidResult};
+use std::arch::x86_64::{CpuidResult, __cpuid_count, __get_cpuid_max};
 
 use crate::cpu_leaf::*;
 
@@ -34,14 +34,14 @@ pub fn get_cpuid(function: u32, count: u32) -> Result<CpuidResult, Error> {
         }
     }
 
-    let max_function = __get_cpuid_max(function & leaf_0x80000000::LEAF_NUM).0;
+    let max_function = unsafe { __get_cpuid_max(function & leaf_0x80000000::LEAF_NUM).0 };
     if function > max_function {
         return Err(Error::InvalidParameters(format!(
             "Function not supported: 0x{function:x}"
         )));
     }
 
-    let entry = __cpuid_count(function, count);
+    let entry = unsafe { __cpuid_count(function, count) };
     if entry.eax == 0 && entry.ebx == 0 && entry.ecx == 0 && entry.edx == 0 {
         return Err(Error::InvalidParameters(format!("Invalid count: {count}")));
     }
